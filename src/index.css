@@ -351,3 +351,13 @@ h1,h2,h3,p { margin-top: 0; }
   .preference-copy { flex-basis: calc(100% - 55px); }
   .consent-actions { width: 100%; justify-content: flex-end; }
 }
+.access-buttons { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 17px; }
+.access-buttons .access-submit { margin: 0; }
+.http-status { padding: 5px 8px; border-radius: 5px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.http-allowed { color: #248a71; background: #eaf7f1; }
+.http-denied { color: #bc6561; background: #fff0ef; }
+.api-response-json { margin: 13px 0; border: 1px solid #e8eef0; border-radius: 7px; overflow: hidden; background: #fbfcfc; }
+.api-response-json>strong { display: block; padding: 8px 10px; color: #596c72; border-bottom: 1px solid #e8eef0; font-size: 9px; }
+.api-response-json pre { max-height: 210px; overflow: auto; margin: 0; padding: 10px; color: #536b72; font: 9px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.event-table td { min-width: 105px; }
+.event-table .purpose-cell { min-width: 180px; }

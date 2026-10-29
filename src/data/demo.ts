@@ -7,6 +7,16 @@ export const demoUser = {
   id: "USR-DEMO-2048"
 };
 
+export const demoUsers = [
+  demoUser,
+  {
+    name: "Mira Sen",
+    initials: "MS",
+    email: "mira.sen@example.test",
+    id: "USR-DEMO-4096"
+  }
+];
+
 export const demoOrganisation = {
   name: "Northstar Financial",
   initials: "N",
@@ -21,6 +31,8 @@ export const demoPurposes = [
   { id: "PUR-FRAUD-PREVENTION", name: "Fraud prevention checks", category: "Security" },
   { id: "PUR-LOCATION", name: "Location-based services", category: "Personalisation" }
 ];
+
+export const demoDataCategories = [...new Set(demoPurposes.map((purpose) => purpose.category))];
 
 export const initialTestResults: TestResult[] = [
   {

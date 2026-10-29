@@ -6,6 +6,15 @@ export const demoUser = {
   email: "aarav.mehta@example.test"
 };
 
+export const demoUsers = [
+  demoUser,
+  {
+    id: "USR-DEMO-4096",
+    name: "Mira Sen",
+    email: "mira.sen@example.test"
+  }
+] as const;
+
 export const demoOrganization = {
   id: "ORG-DEMO-001",
   name: "Northstar Financial",
@@ -67,8 +76,21 @@ export function createDatabase(filename: string): DatabaseSync {
       occurred_at TEXT NOT NULL,
       details TEXT
     );
+    CREATE TABLE IF NOT EXISTS access_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      consent_id TEXT REFERENCES consents(id),
+      user_id TEXT NOT NULL REFERENCES users(id),
+      organization_id TEXT NOT NULL REFERENCES organizations(id),
+      purpose_id TEXT NOT NULL REFERENCES purposes(id),
+      data_category TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK (decision IN ('allowed', 'denied')),
+      occurred_at TEXT NOT NULL,
+      reason TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_consent_events_consent
       ON consent_events(consent_id, occurred_at, id);
+    CREATE INDEX IF NOT EXISTS idx_access_attempts_occurred
+      ON access_attempts(occurred_at DESC, id DESC);
     CREATE TRIGGER IF NOT EXISTS consent_events_no_update
       BEFORE UPDATE ON consent_events BEGIN
         SELECT RAISE(ABORT, 'consent events are append-only');
@@ -76,6 +98,14 @@ export function createDatabase(filename: string): DatabaseSync {
     CREATE TRIGGER IF NOT EXISTS consent_events_no_delete
       BEFORE DELETE ON consent_events BEGIN
         SELECT RAISE(ABORT, 'consent events are append-only');
+      END;
+    CREATE TRIGGER IF NOT EXISTS access_attempts_no_update
+      BEFORE UPDATE ON access_attempts BEGIN
+        SELECT RAISE(ABORT, 'access attempts are append-only');
+      END;
+    CREATE TRIGGER IF NOT EXISTS access_attempts_no_delete
+      BEFORE DELETE ON access_attempts BEGIN
+        SELECT RAISE(ABORT, 'access attempts are append-only');
       END;
   `);
   seedDatabase(db);
@@ -95,14 +125,16 @@ export function withTransaction<T>(db: DatabaseSync, callback: () => T): T {
 }
 
 function seedDatabase(db: DatabaseSync): void {
-  const count = db.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number };
-  if (count.count > 0) return;
-
   const seed = () => withTransaction(db, () => {
-    db.prepare("INSERT INTO users (id, name, email) VALUES (?, ?, ?)").run(demoUser.id, demoUser.name, demoUser.email);
-    db.prepare("INSERT INTO organizations (id, name, sector) VALUES (?, ?, ?)").run(demoOrganization.id, demoOrganization.name, demoOrganization.sector);
-    const insertPurpose = db.prepare("INSERT INTO purposes (id, name, category) VALUES (?, ?, ?)");
-    for (const purpose of demoPurposes) insertPurpose.run(purpose.id, purpose.name, purpose.category);
+    const insertUser = db.prepare("INSERT OR IGNORE INTO users (id, name, email) VALUES (?, ?, ?)");
+    for (const user of demoUsers) insertUser.run(user.id, user.name, user.email);
+    db.prepare("INSERT OR IGNORE INTO organizations (id, name, sector) VALUES (?, ?, ?)").run(demoOrganization.id, demoOrganization.name, demoOrganization.sector);
+    for (const purpose of demoPurposes) {
+      db.prepare("INSERT OR IGNORE INTO purposes (id, name, category) VALUES (?, ?, ?)").run(purpose.id, purpose.name, purpose.category);
+    }
+
+    const count = db.prepare("SELECT COUNT(*) AS count FROM consents").get() as { count: number };
+    if (count.count > 0) return;
 
     const insertConsent = db.prepare(`
       INSERT INTO consents (id, user_id, organization_id, purpose_id, status, created_at, updated_at, granted_at, expires_at)

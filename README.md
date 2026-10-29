@@ -48,8 +48,12 @@ All responses use a `{ "data": ... }` envelope; validation and state-transition 
 | `POST` | `/api/consents/:id/grant` | Grant a pending request |
 | `POST` | `/api/consents/:id/reject` | Reject a pending request |
 | `POST` | `/api/consents/:id/withdraw` | Immediately withdraw an active consent |
+| `GET` | `/api/data-access/check` | Check whether `userId`, `organizationId`, `purposeId`, and `dataCategory` are covered by active consent |
+| `POST` | `/api/data-access` | Request mock data; returns HTTP 403 and no protected data unless exact active consent covers the request |
 
 Every successful state transition updates the canonical consent row and appends a timestamped event in the same SQLite transaction. Database triggers prevent audit-event updates and deletes. Expired active records are transitioned to `expired` when the API is accessed.
+
+Every `POST /api/data-access` decision is stored in the append-only `access_attempts` table and appears in consent history as `access_allowed` or `access_denied`. The simulator uses synthetic profile, account-service, marketing, and security data only.
 
 ## Validate
 

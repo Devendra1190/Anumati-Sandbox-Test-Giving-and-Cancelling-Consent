@@ -20,13 +20,13 @@ import {
   XCircle
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { createConsentRequest, getConsentHistory, getConsents, getCurrentConsentStatus, transitionConsent } from "./api";
+import { checkMockDataAccess, createConsentRequest, getConsentHistory, getConsents, requestMockDataAccess, transitionConsent } from "./api";
 import ConsentTable from "./components/ConsentTable";
 import Sidebar from "./components/Sidebar";
 import StatCard from "./components/StatCard";
 import Topbar from "./components/Topbar";
-import { demoOrganisation, demoPurposes, demoUser, initialTestResults } from "./data/demo";
-import type { ConsentEvent, ConsentRecord, ConsentStatus, Section, TestResult } from "./types";
+import { demoDataCategories, demoOrganisation, demoPurposes, demoUser, demoUsers, initialTestResults } from "./data/demo";
+import type { AccessResponse, ConsentEvent, ConsentRecord, ConsentStatus, Section, TestResult } from "./types";
 
 function App() {
   const [section, setSection] = useState<Section>("Dashboard");
@@ -37,7 +37,9 @@ function App() {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [accessPurpose, setAccessPurpose] = useState(demoPurposes[0].id);
-  const [accessResult, setAccessResult] = useState<{ status: ConsentStatus | "not_found"; consent: ConsentRecord | null } | null>(null);
+  const [accessUser, setAccessUser] = useState(demoUser.id);
+  const [accessCategory, setAccessCategory] = useState(demoPurposes[0].category);
+  const [accessResult, setAccessResult] = useState<AccessResponse | null>(null);
   const [apiError, setApiError] = useState("");
   const [apiLoading, setApiLoading] = useState(true);
 
@@ -80,12 +82,26 @@ function App() {
     return performConsentAction(() => transitionConsent(id, action));
   }
 
-  async function simulateAccessRequest() {
+  function getAccessInput() {
+    return { userId: accessUser, purposeId: accessPurpose, dataCategory: accessCategory };
+  }
+
+  async function checkAccess() {
     setApiError("");
     try {
-      setAccessResult(await getCurrentConsentStatus(accessPurpose));
+      setAccessResult(await checkMockDataAccess(getAccessInput()));
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to evaluate this request.");
+    }
+  }
+
+  async function requestAccess() {
+    setApiError("");
+    try {
+      setAccessResult(await requestMockDataAccess(getAccessInput()));
+      await refreshConsentData();
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to request mock data.");
     }
   }
 
@@ -117,7 +133,7 @@ function App() {
       case "Consent Playground":
         return <PlaygroundPage consents={consents} onCreateRequest={createRequest} onUpdate={updateConsent} />;
       case "Data Access Simulator":
-        return <AccessPage purpose={accessPurpose} onPurposeChange={(value) => { setAccessPurpose(value); setAccessResult(null); }} result={accessResult} onSimulate={simulateAccessRequest} />;
+        return <AccessPage userId={accessUser} onUserChange={(value) => { setAccessUser(value); setAccessResult(null); }} category={accessCategory} onCategoryChange={(value) => { setAccessCategory(value); setAccessResult(null); }} purpose={accessPurpose} onPurposeChange={(value) => { setAccessPurpose(value); setAccessResult(null); }} result={accessResult} onCheck={checkAccess} onRequest={requestAccess} />;
       case "Automated Test Lab":
         return <TestLabPage results={testResults} onRun={runTest} failed={counts.failed} />;
       case "Consent History":
@@ -258,26 +274,35 @@ function PlaygroundPage({ consents, onCreateRequest, onUpdate }: PlaygroundPageP
 }
 
 interface AccessPageProps {
+  userId: string;
+  onUserChange: (value: string) => void;
+  category: string;
+  onCategoryChange: (value: string) => void;
   purpose: string;
   onPurposeChange: (value: string) => void;
-  result: { status: ConsentStatus | "not_found"; consent: ConsentRecord | null } | null;
-  onSimulate: () => void;
+  result: AccessResponse | null;
+  onCheck: () => void;
+  onRequest: () => void;
 }
 
-function AccessPage({ purpose, onPurposeChange, result, onSimulate }: AccessPageProps) {
-  const allowed = result?.status === "active";
-  const selected = result?.consent;
+function AccessPage({ userId, onUserChange, category, onCategoryChange, purpose, onPurposeChange, result, onCheck, onRequest }: AccessPageProps) {
+  const user = demoUsers.find((candidate) => candidate.id === userId) ?? demoUser;
+  const selectedPurpose = demoPurposes.find((candidate) => candidate.id === purpose) ?? demoPurposes[0];
+  const decision = result?.body.data;
+  const allowed = decision?.decision === "allowed";
   return <>
     <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> REQUEST SIMULATOR</div><h1>Data Access Simulator</h1><p>See how consent status affects a data access request.</p></div><span className="page-demo-badge"><span /> Mock API</span></div>
-    <div className="demo-banner"><div className="demo-banner-icon"><Database size={17} /></div><div><strong>This does not contact a real service</strong><p>Requests are evaluated against local demo records only. No personal data is read, sent, or stored remotely.</p></div><span className="demo-banner-tag">OFFLINE</span></div>
+    <div className="demo-banner"><div className="demo-banner-icon"><Database size={17} /></div><div><strong>Backend-enforced access to synthetic data</strong><p>The API checks the user, exact purpose, data category, consent status, and expiry before returning mock data.</p></div><span className="demo-banner-tag">SYNTHETIC</span></div>
     <div className="access-layout"><section className="panel access-form"><div className="panel-heading"><div><h2>Simulate a data request</h2><p>Configure a mock request from the organisation</p></div></div>
       <label className="field-label">DATA FIDUCIARY</label><div className="mock-field"><span className="workspace-avatar">N</span><div><strong>{demoOrganisation.name}</strong><small>{demoOrganisation.id} · {demoOrganisation.sector}</small></div><span className="readonly-tag">DEMO</span></div>
-      <label className="field-label" htmlFor="access-purpose">CONSENT PURPOSE</label><select className="form-select" id="access-purpose" value={purpose} onChange={(event) => onPurposeChange(event.target.value)}>{demoPurposes.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>
-      <div className="request-detail"><span>Requested data</span><strong>Profile &amp; preference data</strong><span>Data principal</span><strong>{demoUser.name} <small>({demoUser.id})</small></strong></div>
-      <button className="button button-primary access-submit" onClick={onSimulate}><Activity size={16} /> Simulate access request</button>
+      <label className="field-label" htmlFor="access-user">SYNTHETIC USER</label><select className="form-select" id="access-user" value={userId} onChange={(event) => onUserChange(event.target.value)}>{demoUsers.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.id}</option>)}</select>
+      <label className="field-label" htmlFor="access-category">DATA CATEGORY</label><select className="form-select" id="access-category" value={category} onChange={(event) => onCategoryChange(event.target.value)}>{demoDataCategories.map((value) => <option key={value} value={value}>{value}</option>)}</select>
+      <label className="field-label" htmlFor="access-purpose">PROCESSING PURPOSE</label><select className="form-select" id="access-purpose" value={purpose} onChange={(event) => onPurposeChange(event.target.value)}>{demoPurposes.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>
+      <div className="request-detail"><span>Data principal</span><strong>{user.name} <small>({user.id})</small></strong><span>Requested category</span><strong>{category}</strong><span>Processing purpose</span><strong>{selectedPurpose.name}</strong></div>
+      <div className="access-buttons"><button className="button button-secondary" onClick={onCheck}><ShieldCheck size={15} /> Check consent</button><button className="button button-primary access-submit" onClick={onRequest}><LockKeyhole size={15} /> Request mock data</button></div>
     </section>
-    <section className="panel access-result-panel"><div className="panel-heading"><div><h2>Request outcome</h2><p>Consent-aware access evaluation</p></div></div>
-      {!result ? <div className="result-empty"><div className="result-empty-icon"><Database size={22} /></div><strong>Ready to evaluate</strong><p>Run a request to check the selected purpose against the current consent record.</p><div className="result-check"><span><Check size={13} /></span> Consent status check</div><div className="result-check"><span><Check size={13} /></span> Purpose matching</div></div> : <div className={`result-outcome ${allowed ? "allowed" : "denied"}`}><div className={`outcome-icon ${allowed ? "allowed" : "denied"}`} >{allowed ? <CheckCircle2 size={26} /> : <XCircle size={26} />}</div><span className={`outcome-kicker ${allowed ? "allowed" : "denied"}`}>{allowed ? "REQUEST AUTHORISED" : "REQUEST DENIED"}</span><h3>{allowed ? "Consent is active" : "No active consent found"}</h3><p>{allowed ? "The demo user has granted permission for this purpose. The mock request may proceed." : "The demo user does not have active permission for this purpose. Access is blocked."}</p><div className="outcome-record"><span>Matched consent record</span><strong>{selected?.id ?? "No active record"}</strong><span>Current status</span><strong className={allowed ? "allowed" : "denied"}>{selected?.status ?? "Not granted"}</strong></div><button className="button button-secondary" onClick={onSimulate}><RotateCcw size={15} /> Run again</button></div>}
+    <section className="panel access-result-panel"><div className="panel-heading"><div><h2>API response</h2><p>Access decision from the backend</p></div>{result && <span className={`http-status ${allowed ? "http-allowed" : "http-denied"}`}>HTTP {result.httpStatus}</span>}</div>
+      {!result ? <div className="result-empty"><div className="result-empty-icon"><Database size={22} /></div><strong>Ready to evaluate</strong><p>Check consent or request the protected mock data. Each access request is audited by the server.</p><div className="result-check"><span><Check size={13} /></span> Exact purpose and category check</div><div className="result-check"><span><Check size={13} /></span> Protected data returned only if authorised</div></div> : <div className={`result-outcome ${allowed ? "allowed" : "denied"}`}><div className={`outcome-icon ${allowed ? "allowed" : "denied"}`} >{allowed ? <CheckCircle2 size={26} /> : <XCircle size={26} />}</div><span className={`outcome-kicker ${allowed ? "allowed" : "denied"}`}>{allowed ? "REQUEST AUTHORISED" : "REQUEST DENIED"}</span><h3>{allowed ? "Consent is active" : "Access blocked"}</h3><p>{decision?.reason}</p><div className="outcome-record"><span>Matched consent</span><strong>{decision?.consentId ?? "None"}</strong><span>Consent status</span><strong className={allowed ? "allowed" : "denied"}>{decision?.consentStatus}</strong><span>Audit entry</span><strong>{decision?.auditId ? `#${decision.auditId}` : "Consent check only"}</strong></div><div className="api-response-json"><strong>{decision?.mockData ? "Protected mock data" : decision?.auditId ? "No protected data returned" : "Consent check response"}</strong><pre>{JSON.stringify(result.body, null, 2)}</pre></div><button className="button button-secondary" onClick={onRequest}><RotateCcw size={15} /> Retry access request</button></div>}
     </section></div>
   </>;
 }
@@ -322,8 +347,8 @@ function HistoryPage({ events, filter, onFilterChange, search, onSearchChange }:
   return <>
     <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> AUDIT TRAIL</div><h1>Consent History</h1><p>A transparent, purpose-specific record of consent changes.</p></div><span className="page-demo-badge"><span /> Demo records</span></div>
     <div className="demo-banner"><div className="demo-banner-icon"><HistoryIcon /></div><div><strong>Append-only consent audit trail</strong><p>Every request and status change is timestamped in SQLite. This synthetic demo history is not a legally binding record.</p></div><span className="demo-banner-tag">SYNTHETIC</span></div>
-    <section className="panel history-panel"><div className="history-toolbar"><div><h2>Consent events</h2><p>{visibleEvents.length} {visibleEvents.length === 1 ? "event" : "events"} in this view</p></div><div className="history-controls"><label className="search-field"><SearchIcon /><input aria-label="Search consent events" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search events..." /></label><select className="filter-select" aria-label="Filter by event type" value={filter} onChange={(event) => onFilterChange(event.target.value)}><option value="all">All events</option><option value="requested">Requested</option><option value="granted">Granted</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="expired">Expired</option></select></div></div>
-      {visibleEvents.length === 0 ? <div className="empty-state"><div className="empty-icon"><HistoryIcon /></div><strong>No consent events found</strong><p>Try changing your search or event filter.</p></div> : <div className="table-scroll"><table className="consent-table event-table"><thead><tr><th>EVENT</th><th>CONSENT PURPOSE</th><th>CONSENT ID</th><th>TIMESTAMP</th></tr></thead><tbody>{visibleEvents.map((event) => <tr key={event.id}><td><span className={`status-badge status-${eventStatus(event.eventType)}`}><i />{event.eventType}</span></td><td><div className="purpose-cell"><span className="purpose-icon"><ShieldCheck size={15} /></span><span><strong>{event.purpose}</strong><small>{event.category}</small></span></div></td><td className="date-cell">{event.consentId}</td><td className="date-cell">{formatEventDate(event.occurredAt)}</td></tr>)}</tbody></table></div>}
+    <section className="panel history-panel"><div className="history-toolbar"><div><h2>Consent &amp; access events</h2><p>{visibleEvents.length} {visibleEvents.length === 1 ? "event" : "events"} in this view</p></div><div className="history-controls"><label className="search-field"><SearchIcon /><input aria-label="Search consent events" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search events..." /></label><select className="filter-select" aria-label="Filter by event type" value={filter} onChange={(event) => onFilterChange(event.target.value)}><option value="all">All events</option><option value="requested">Requested</option><option value="granted">Granted</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="expired">Expired</option><option value="access_allowed">Access allowed</option><option value="access_denied">Access denied</option></select></div></div>
+      {visibleEvents.length === 0 ? <div className="empty-state"><div className="empty-icon"><HistoryIcon /></div><strong>No consent or access events found</strong><p>Try changing your search or event filter.</p></div> : <div className="table-scroll"><table className="consent-table event-table"><thead><tr><th>EVENT</th><th>PROCESSING PURPOSE</th><th>DATA CATEGORY</th><th>CONSENT / AUDIT ID</th><th>TIMESTAMP</th></tr></thead><tbody>{visibleEvents.map((event) => <tr key={event.id}><td><span className={`status-badge status-${eventStatus(event.eventType)}`}><i />{formatEventName(event.eventType)}</span></td><td><div className="purpose-cell"><span className="purpose-icon"><ShieldCheck size={15} /></span><span><strong>{event.purpose}</strong><small>{event.userId}</small></span></div></td><td className="date-cell">{event.category}</td><td className="date-cell">{event.consentId ?? `ACCESS-${event.id.toString().replace("access-", "")}`}</td><td className="date-cell">{formatEventDate(event.occurredAt)}</td></tr>)}</tbody></table></div>}
     </section>
     <div className="history-note"><ShieldCheck size={16} /><span>In a production system, consent records should be tamper-evident and retained according to applicable policies.</span></div>
   </>;
@@ -331,7 +356,14 @@ function HistoryPage({ events, filter, onFilterChange, search, onSearchChange }:
 
 function eventStatus(event: ConsentEvent["eventType"]): ConsentStatus {
   if (event === "requested") return "pending";
-  if (event === "granted") return "active";
+  if (event === "granted" || event === "access_allowed") return "active";
+  if (event === "access_denied") return "rejected";
+  return event;
+}
+
+function formatEventName(event: ConsentEvent["eventType"]): string {
+  if (event === "access_allowed") return "Access allowed";
+  if (event === "access_denied") return "Access denied";
   return event;
 }
 
