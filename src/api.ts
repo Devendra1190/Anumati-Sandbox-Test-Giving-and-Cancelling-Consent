@@ -1,5 +1,5 @@
 import { demoOrganisation, demoUser } from "./data/demo";
-import type { ConsentEvent, ConsentRecord, ConsentStatus } from "./types";
+import type { AccessDecision, AccessResponse, ConsentEvent, ConsentRecord } from "./types";
 
 interface ApiEnvelope<T> {
   data: T;
@@ -51,10 +51,37 @@ export function transitionConsent(
   return apiRequest(`/api/consents/${encodeURIComponent(id)}/${action}`, { method: "POST" });
 }
 
-export function getCurrentConsentStatus(purposeId: string): Promise<{
-  status: ConsentStatus | "not_found";
-  consent: ConsentRecord | null;
-}> {
-  const query = new URLSearchParams({ ...Object.fromEntries(demoQuery), purposeId });
-  return apiRequest(`/api/consents/status?${query}`);
+export function checkMockDataAccess(input: {
+  userId: string;
+  dataCategory: string;
+  purposeId: string;
+}): Promise<AccessResponse> {
+  const query = new URLSearchParams({
+    userId: input.userId,
+    organizationId: demoOrganisation.id,
+    dataCategory: input.dataCategory,
+    purposeId: input.purposeId
+  });
+  return apiRequest<AccessDecision>(`/api/data-access/check?${query}`)
+    .then((data) => ({ httpStatus: 200, body: { data } }));
+}
+
+export async function requestMockDataAccess(input: {
+  userId: string;
+  dataCategory: string;
+  purposeId: string;
+}): Promise<AccessResponse> {
+  const response = await fetch("/api/data-access", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, organizationId: demoOrganisation.id })
+  });
+  const payload = await response.json() as { data?: AccessDecision; error?: string };
+  if (!payload.data) {
+    throw new Error(payload.error ?? `Access request failed (${response.status}).`);
+  }
+  return {
+    httpStatus: response.status,
+    body: { data: payload.data, ...(payload.error ? { error: payload.error } : {}) }
+  };
 }

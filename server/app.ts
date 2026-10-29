@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import {
   currentConsent,
+  demoUsers,
   demoPurposes,
   demoUser,
   demoOrganization,
@@ -58,23 +59,153 @@ function appendEvent(db: DatabaseSync, consentId: string, eventType: EventType, 
 }
 
 function eventHistory(db: DatabaseSync, consentId?: string, userId?: string, organizationId?: string) {
-  const where: string[] = [];
-  const values: string[] = [];
-  if (consentId) { where.push("e.consent_id = ?"); values.push(consentId); }
-  if (userId) { where.push("c.user_id = ?"); values.push(userId); }
-  if (organizationId) { where.push("c.organization_id = ?"); values.push(organizationId); }
-  const condition = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const consentWhere: string[] = [];
+  const accessWhere: string[] = [];
+  const consentValues: string[] = [];
+  const accessValues: string[] = [];
+  if (consentId) {
+    consentWhere.push("e.consent_id = ?");
+    consentValues.push(consentId);
+  }
+  if (userId) {
+    consentWhere.push("c.user_id = ?");
+    accessWhere.push("a.user_id = ?");
+    consentValues.push(userId);
+    accessValues.push(userId);
+  }
+  if (organizationId) {
+    consentWhere.push("c.organization_id = ?");
+    accessWhere.push("a.organization_id = ?");
+    consentValues.push(organizationId);
+    accessValues.push(organizationId);
+  }
+  if (consentId) accessWhere.push("a.consent_id = ?");
+  if (consentId) accessValues.push(consentId);
+  const consentCondition = consentWhere.length ? `WHERE ${consentWhere.join(" AND ")}` : "";
+  const accessCondition = accessWhere.length ? `WHERE ${accessWhere.join(" AND ")}` : "";
   return db.prepare(`
-    SELECT e.id, e.consent_id AS consentId, e.event_type AS eventType,
+    SELECT * FROM (
+    SELECT CAST(e.id AS TEXT) AS id, e.consent_id AS consentId, e.event_type AS eventType,
       e.occurred_at AS occurredAt, e.details, p.id AS purposeId,
       p.name AS purpose, p.category, c.user_id AS userId,
       c.organization_id AS organizationId
     FROM consent_events e
     JOIN consents c ON c.id = e.consent_id
     JOIN purposes p ON p.id = c.purpose_id
-    ${condition}
-    ORDER BY e.occurred_at DESC, e.id DESC
-  `).all(...values);
+    ${consentCondition}
+    UNION ALL
+    SELECT 'access-' || a.id AS id, a.consent_id AS consentId,
+      CASE a.decision WHEN 'allowed' THEN 'access_allowed' ELSE 'access_denied' END AS eventType,
+      a.occurred_at AS occurredAt, a.reason AS details, p.id AS purposeId,
+      p.name AS purpose, a.data_category AS category, a.user_id AS userId,
+      a.organization_id AS organizationId
+    FROM access_attempts a
+    JOIN purposes p ON p.id = a.purpose_id
+    ${accessCondition}
+    ) ORDER BY occurredAt DESC, id DESC
+  `).all(...consentValues, ...accessValues);
+}
+
+interface AccessInput {
+  userId: string;
+  organizationId: string;
+  purposeId: string;
+  dataCategory: string;
+}
+
+interface AccessEvaluation {
+  decision: "allowed" | "denied";
+  userId: string;
+  organizationId: string;
+  purposeId: string;
+  purpose: string;
+  dataCategory: string;
+  consentId: string | null;
+  consentStatus: ConsentRow["status"] | "not_found";
+  reason: string;
+}
+
+const syntheticRecords: Record<string, Record<string, string | string[]>> = {
+  Personalisation: {
+    profile: "Synthetic demo preferences",
+    interests: ["financial wellness", "savings"]
+  },
+  "Account services": {
+    accountReference: "DEMO-ACCT-2048",
+    statementCycle: "Monthly"
+  },
+  Marketing: {
+    preferredChannel: "Email (synthetic)",
+    offerInterests: ["travel", "education"]
+  },
+  Security: {
+    riskLevel: "Low (synthetic)",
+    lastReview: "2026-10-28"
+  }
+};
+
+function evaluateAccess(db: DatabaseSync, input: AccessInput): AccessEvaluation {
+  const demoUserExists = db.prepare("SELECT 1 FROM users WHERE id = ?").get(input.userId);
+  const demoOrganizationExists = db.prepare("SELECT 1 FROM organizations WHERE id = ?").get(input.organizationId);
+  const purpose = demoPurposes.find((candidate) => candidate.id === input.purposeId);
+  if (!demoUserExists || !demoOrganizationExists || !purpose) {
+    throw new ApiError(400, "Select a valid synthetic user, organisation, and processing purpose.");
+  }
+  if (!Object.hasOwn(syntheticRecords, input.dataCategory)) {
+    throw new ApiError(400, "Select a valid synthetic data category.");
+  }
+
+  const consent = currentConsent(db, {
+    userId: input.userId,
+    organizationId: input.organizationId,
+    purposeId: input.purposeId
+  });
+  let reason = "";
+  if (!consent) {
+    reason = "No consent request exists for this user, organisation, and purpose.";
+  } else if (consent.status !== "active") {
+    reason = `Consent status is '${consent.status}'; active consent is required.`;
+  } else if (consent.category !== input.dataCategory) {
+    reason = `Consent covers '${consent.category}', not the requested '${input.dataCategory}' category.`;
+  } else if (consent.expiresAt && Date.parse(consent.expiresAt) <= Date.now()) {
+    reason = "Consent has expired.";
+  } else {
+    reason = "Active consent covers the exact requested purpose and data category.";
+  }
+
+  return {
+    decision: consent?.status === "active" && consent.category === input.dataCategory &&
+      (!consent.expiresAt || Date.parse(consent.expiresAt) > Date.now()) ? "allowed" : "denied",
+    userId: input.userId,
+    organizationId: input.organizationId,
+    purposeId: purpose.id,
+    purpose: purpose.name,
+    dataCategory: input.dataCategory,
+    consentId: consent?.id ?? null,
+    consentStatus: consent?.status ?? "not_found",
+    reason
+  };
+}
+
+function recordAccessAttempt(db: DatabaseSync, evaluation: AccessEvaluation): number {
+  return withTransaction(db, () => {
+    const result = db.prepare(`
+      INSERT INTO access_attempts (
+        consent_id, user_id, organization_id, purpose_id, data_category,
+        decision, occurred_at, reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      evaluation.consentId,
+      evaluation.userId,
+      evaluation.organizationId,
+      evaluation.purposeId,
+      evaluation.dataCategory,
+      evaluation.decision,
+      new Date().toISOString(),
+      evaluation.reason
+    );
+    return Number(result.lastInsertRowid);
+  });
 }
 
 function actionConsent(
@@ -124,7 +255,7 @@ export function createApp(db: DatabaseSync) {
   });
 
   app.get("/api/demo-context", (_request, response) => {
-    response.json({ data: { user: demoUser, organization: demoOrganization, purposes: demoPurposes } });
+    response.json({ data: { user: demoUser, users: demoUsers, organization: demoOrganization, purposes: demoPurposes } });
   });
 
   app.get("/api/consents", (request, response) => {
@@ -146,6 +277,44 @@ export function createApp(db: DatabaseSync) {
     const purposeId = requiredString(request.query.purposeId, "purposeId");
     const consent = currentConsent(db, { userId, organizationId, purposeId });
     response.json({ data: consent ? { status: consent.status, consent } : { status: "not_found", consent: null } });
+  });
+
+  app.get("/api/data-access/check", (request, response) => {
+    const evaluation = evaluateAccess(db, {
+      userId: requiredString(request.query.userId, "userId"),
+      organizationId: requiredString(request.query.organizationId, "organizationId"),
+      purposeId: requiredString(request.query.purposeId, "purposeId"),
+      dataCategory: requiredString(request.query.dataCategory, "dataCategory")
+    });
+    response.json({ data: evaluation });
+  });
+
+  app.post("/api/data-access", (request, response) => {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new ApiError(400, "Request body must be a JSON object.");
+    }
+    const evaluation = evaluateAccess(db, {
+      userId: requiredString(body.userId, "userId"),
+      organizationId: requiredString(body.organizationId, "organizationId"),
+      purposeId: requiredString(body.purposeId, "purposeId"),
+      dataCategory: requiredString(body.dataCategory, "dataCategory")
+    });
+    const auditId = recordAccessAttempt(db, evaluation);
+    if (evaluation.decision === "denied") {
+      response.status(403).json({
+        error: "Access denied.",
+        data: { ...evaluation, auditId }
+      });
+      return;
+    }
+    response.json({
+      data: {
+        ...evaluation,
+        auditId,
+        mockData: syntheticRecords[evaluation.dataCategory]
+      }
+    });
   });
 
   app.get("/api/consents/history", (request, response) => {

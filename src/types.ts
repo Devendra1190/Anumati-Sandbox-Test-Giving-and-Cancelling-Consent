@@ -22,9 +22,9 @@ export interface ConsentRecord {
 }
 
 export interface ConsentEvent {
-  id: number;
-  consentId: string;
-  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired";
+  id: number | string;
+  consentId: string | null;
+  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired" | "access_allowed" | "access_denied";
   occurredAt: string;
   details: string | null;
   purposeId: string;
@@ -32,6 +32,28 @@ export interface ConsentEvent {
   category: string;
   userId: string;
   organizationId: string;
+}
+
+export interface AccessDecision {
+  decision: "allowed" | "denied";
+  userId: string;
+  organizationId: string;
+  purposeId: string;
+  purpose: string;
+  dataCategory: string;
+  consentId: string | null;
+  consentStatus: ConsentStatus | "not_found";
+  reason: string;
+  auditId?: number;
+  mockData?: Record<string, string | string[]>;
+}
+
+export interface AccessResponse {
+  httpStatus: number;
+  body: {
+    error?: string;
+    data: AccessDecision;
+  };
 }
 
 export interface TestResult {
