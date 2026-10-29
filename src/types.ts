@@ -24,7 +24,7 @@ export interface ConsentRecord {
 export interface ConsentEvent {
   id: number | string;
   consentId: string | null;
-  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired" | "access_allowed" | "access_denied";
+  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired" | "access_allowed" | "access_denied" | "demo_reset";
   occurredAt: string;
   details: string | null;
   purposeId: string;
@@ -58,6 +58,7 @@ export interface AccessResponse {
 
 export interface TestResult {
   id: string;
+  testId: string;
   name: string;
   expectedResult: string;
   actualResult: string;
@@ -70,6 +71,18 @@ export interface TestResult {
     status: "PASS" | "FAIL" | "NEEDS REVIEW";
     explanation: string;
   };
+  runId: string;
+  executedAt: string;
+}
+
+export interface DashboardStats {
+  active: number;
+  withdrawn: number;
+  tests: number;
+  passed: number;
+  failed: number;
+  needsReview: number;
+  activity: Array<{ date: string; label: string; grants: number; withdrawals: number }>;
 }
 
 export interface JourneyMetrics {

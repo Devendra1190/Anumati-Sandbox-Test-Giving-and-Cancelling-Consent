@@ -9,9 +9,13 @@ import {
   demoPurposes,
   demoUser,
   demoOrganization,
+  getDashboardStats,
+  getTestLabResults,
   getWithdrawalJourneyConfig,
   getConsent,
   listConsents,
+  resetDemoData,
+  saveTestLabResults,
   setWithdrawalJourneyConfig,
   synchronizeExpiredConsents,
   withTransaction,
@@ -107,8 +111,17 @@ function eventHistory(db: DatabaseSync, consentId?: string, userId?: string, org
     FROM access_attempts a
     JOIN purposes p ON p.id = a.purpose_id
     ${accessCondition}
+    UNION ALL
+    SELECT 'reset-' || r.id AS id, r.consent_id AS consentId,
+      'demo_reset' AS eventType, r.occurred_at AS occurredAt, r.details,
+      p.id AS purposeId, p.name AS purpose, p.category, c.user_id AS userId,
+      c.organization_id AS organizationId
+    FROM demo_reset_events r
+    JOIN consents c ON c.id = r.consent_id
+    JOIN purposes p ON p.id = c.purpose_id
+    ${consentWhere.length ? `WHERE ${consentWhere.map((condition) => condition.replace("e.consent_id", "c.id")).join(" AND ")}` : ""}
     ) ORDER BY occurredAt DESC, id DESC
-  `).all(...consentValues, ...accessValues);
+  `).all(...consentValues, ...accessValues, ...consentValues);
 }
 
 interface AccessInput {
@@ -220,6 +233,7 @@ export function actionConsent(
 ): ConsentRow {
   const consent = getConsent(db, consentId);
   if (!consent) throw new ApiError(404, "Consent request not found.");
+  if (consent.archivedAt) throw new ApiError(404, "Consent request is archived by the demo reset.");
   if (action === "grant" && consent.expiresAt && Date.parse(consent.expiresAt) <= Date.now()) {
     const now = new Date().toISOString();
     withTransaction(db, () => {
@@ -603,6 +617,29 @@ export function createApp(db: DatabaseSync) {
     response.json({ data: { user: demoUser, users: demoUsers, organization: demoOrganization, purposes: demoPurposes } });
   });
 
+  app.get("/api/dashboard/stats", (_request, response) => {
+    response.json({ data: getDashboardStats(db) });
+  });
+
+  app.post("/api/demo/reset", (_request, response) => {
+    resetDemoData(db);
+    response.json({
+      data: {
+        message: "Synthetic demo data restored. Consent and access audit history was retained.",
+        stats: getDashboardStats(db)
+      }
+    });
+  });
+
+  app.get("/api/test-lab/results", (request, response) => {
+    const rawLimit = request.query.limit;
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new ApiError(400, "limit must be an integer between 1 and 100.");
+    }
+    response.json({ data: getTestLabResults(db, undefined, limit) });
+  });
+
   app.get("/api/test-lab/config", (_request, response) => {
     response.json({ data: getWithdrawalJourneyConfig(db) });
   });
@@ -631,7 +668,18 @@ export function createApp(db: DatabaseSync) {
     }
     const testId = body.testId === undefined ? undefined : requiredString(body.testId, "testId");
     const config = getWithdrawalJourneyConfig(db);
-    response.json({ data: { results: runConsentTests(config, testId), config } });
+    const executedResults = runConsentTests(config, testId);
+    const results = saveTestLabResults(db, randomUUID(), executedResults.map((result) => ({
+      testId: result.id,
+      name: result.name,
+      expectedResult: result.expectedResult,
+      actualResult: result.actualResult,
+      status: result.status,
+      executionTimeMs: result.executionTimeMs,
+      failureExplanation: result.failureExplanation,
+      journeyComparison: result.journeyComparison
+    })));
+    response.json({ data: { results, config } });
   });
 
   app.get("/api/consents", (request, response) => {
@@ -722,7 +770,7 @@ export function createApp(db: DatabaseSync) {
 
   app.get("/api/consents/:id", (request, response) => {
     const consent = getConsent(db, request.params.id);
-    if (!consent) throw new ApiError(404, "Consent request not found.");
+    if (!consent || consent.archivedAt) throw new ApiError(404, "Consent request not found.");
     response.json({ data: consent });
   });
 
