@@ -1,17 +1,26 @@
 import express, { type ErrorRequestHandler, type Request, type Response } from "express";
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import assert from "node:assert/strict";
 import {
+  createDatabase,
   currentConsent,
   demoUsers,
   demoPurposes,
   demoUser,
   demoOrganization,
+  getDashboardStats,
+  getTestLabResults,
+  getWithdrawalJourneyConfig,
   getConsent,
   listConsents,
+  resetDemoData,
+  saveTestLabResults,
+  setWithdrawalJourneyConfig,
   synchronizeExpiredConsents,
   withTransaction,
-  type ConsentRow
+  type ConsentRow,
+  type WithdrawalJourneyConfig
 } from "./db.js";
 
 type EventType = "requested" | "granted" | "rejected" | "withdrawn" | "expired";
@@ -102,8 +111,17 @@ function eventHistory(db: DatabaseSync, consentId?: string, userId?: string, org
     FROM access_attempts a
     JOIN purposes p ON p.id = a.purpose_id
     ${accessCondition}
+    UNION ALL
+    SELECT 'reset-' || r.id AS id, r.consent_id AS consentId,
+      'demo_reset' AS eventType, r.occurred_at AS occurredAt, r.details,
+      p.id AS purposeId, p.name AS purpose, p.category, c.user_id AS userId,
+      c.organization_id AS organizationId
+    FROM demo_reset_events r
+    JOIN consents c ON c.id = r.consent_id
+    JOIN purposes p ON p.id = c.purpose_id
+    ${consentWhere.length ? `WHERE ${consentWhere.map((condition) => condition.replace("e.consent_id", "c.id")).join(" AND ")}` : ""}
     ) ORDER BY occurredAt DESC, id DESC
-  `).all(...consentValues, ...accessValues);
+  `).all(...consentValues, ...accessValues, ...consentValues);
 }
 
 interface AccessInput {
@@ -144,7 +162,7 @@ const syntheticRecords: Record<string, Record<string, string | string[]>> = {
   }
 };
 
-function evaluateAccess(db: DatabaseSync, input: AccessInput): AccessEvaluation {
+export function evaluateAccess(db: DatabaseSync, input: AccessInput): AccessEvaluation {
   const demoUserExists = db.prepare("SELECT 1 FROM users WHERE id = ?").get(input.userId);
   const demoOrganizationExists = db.prepare("SELECT 1 FROM organizations WHERE id = ?").get(input.organizationId);
   const purpose = demoPurposes.find((candidate) => candidate.id === input.purposeId);
@@ -187,7 +205,7 @@ function evaluateAccess(db: DatabaseSync, input: AccessInput): AccessEvaluation 
   };
 }
 
-function recordAccessAttempt(db: DatabaseSync, evaluation: AccessEvaluation): number {
+export function recordAccessAttempt(db: DatabaseSync, evaluation: AccessEvaluation): number {
   return withTransaction(db, () => {
     const result = db.prepare(`
       INSERT INTO access_attempts (
@@ -208,13 +226,14 @@ function recordAccessAttempt(db: DatabaseSync, evaluation: AccessEvaluation): nu
   });
 }
 
-function actionConsent(
+export function actionConsent(
   db: DatabaseSync,
   consentId: string,
   action: "grant" | "reject" | "withdraw"
 ): ConsentRow {
   const consent = getConsent(db, consentId);
   if (!consent) throw new ApiError(404, "Consent request not found.");
+  if (consent.archivedAt) throw new ApiError(404, "Consent request is archived by the demo reset.");
   if (action === "grant" && consent.expiresAt && Date.parse(consent.expiresAt) <= Date.now()) {
     const now = new Date().toISOString();
     withTransaction(db, () => {
@@ -242,6 +261,346 @@ function actionConsent(
   return getConsent(db, consentId)!;
 }
 
+function createPendingConsent(
+  db: DatabaseSync,
+  userId: string,
+  organizationId: string,
+  purposeId: string,
+  expiresAt: string
+): ConsentRow {
+  const exists = db.prepare(`
+    SELECT
+      EXISTS(SELECT 1 FROM users WHERE id = ?) AS userExists,
+      EXISTS(SELECT 1 FROM organizations WHERE id = ?) AS organizationExists,
+      EXISTS(SELECT 1 FROM purposes WHERE id = ?) AS purposeExists
+  `).get(userId, organizationId, purposeId) as { userExists: number; organizationExists: number; purposeExists: number };
+  if (!exists.userExists || !exists.organizationExists || !exists.purposeExists) {
+    throw new ApiError(400, "userId, organizationId, and purposeId must reference the synthetic demo data.");
+  }
+  const current = currentConsent(db, { userId, organizationId, purposeId });
+  if (current?.status === "pending" || current?.status === "active") {
+    throw new ApiError(409, `A ${current.status} consent already exists for this purpose.`);
+  }
+  const id = `CNS-${randomUUID()}`;
+  const now = new Date().toISOString();
+  withTransaction(db, () => {
+    db.prepare(`
+      INSERT INTO consents (id, user_id, organization_id, purpose_id, status, created_at, updated_at, expires_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(id, userId, organizationId, purposeId, now, now, expiresAt);
+    appendEvent(db, id, "requested", "Consent request created.");
+  });
+  return getConsent(db, id)!;
+}
+
+interface EaseJourneyMetrics {
+  actions: string[];
+  clicks: number;
+  navigationTransitions: number;
+  mandatoryFields: number;
+  additionalConfirmations: number;
+  unnecessaryObstacles: number;
+  errors: number;
+}
+
+function getEaseJourneyMetrics(config: WithdrawalJourneyConfig): {
+  grant: EaseJourneyMetrics;
+  withdrawal: EaseJourneyMetrics;
+  status: "PASS" | "FAIL" | "NEEDS REVIEW";
+  explanation: string;
+} {
+  const grant: EaseJourneyMetrics = {
+    actions: ["Open Consent Playground", "Create consent request", "Grant consent"],
+    clicks: 2,
+    navigationTransitions: 1,
+    mandatoryFields: 0,
+    additionalConfirmations: 0,
+    unnecessaryObstacles: 0,
+    errors: 0
+  };
+  const withdrawal: EaseJourneyMetrics = {
+    actions: ["Open Consent Playground", "Withdraw consent"],
+    clicks: 1,
+    navigationTransitions: 1,
+    mandatoryFields: 0,
+    additionalConfirmations: 0,
+    unnecessaryObstacles: 0,
+    errors: 0
+  };
+  if (config.extraNavigation) {
+    withdrawal.actions.splice(1, 0, "Open Account Settings", "Open Privacy Centre");
+    withdrawal.navigationTransitions += 2;
+    withdrawal.clicks += 2;
+    withdrawal.unnecessaryObstacles += 2;
+  }
+  if (config.mandatoryField) {
+    withdrawal.actions.push("Enter mandatory withdrawal explanation");
+    withdrawal.mandatoryFields++;
+    withdrawal.clicks++;
+    withdrawal.unnecessaryObstacles++;
+  }
+  if (config.extraConfirmation) {
+    withdrawal.actions.push("Confirm withdrawal again");
+    withdrawal.additionalConfirmations++;
+    withdrawal.clicks++;
+    withdrawal.unnecessaryObstacles++;
+  }
+  if (config.unnecessaryError) {
+    withdrawal.actions.push("Recover from a simulated withdrawal error");
+    withdrawal.errors++;
+    withdrawal.clicks++;
+    withdrawal.unnecessaryObstacles++;
+  }
+
+  if (withdrawal.mandatoryFields > grant.mandatoryFields ||
+    withdrawal.additionalConfirmations > grant.additionalConfirmations ||
+    withdrawal.errors > 0) {
+    return {
+      grant,
+      withdrawal,
+      status: "FAIL",
+      explanation: "The withdrawal journey adds a mandatory field, extra confirmation, or simulated error that is absent from the grant journey."
+    };
+  }
+  if (withdrawal.navigationTransitions > grant.navigationTransitions ||
+    withdrawal.unnecessaryObstacles > 0) {
+    return {
+      grant,
+      withdrawal,
+      status: "NEEDS REVIEW",
+      explanation: "The withdrawal journey introduces additional navigation or obstacles that need human review."
+    };
+  }
+  return {
+    grant,
+    withdrawal,
+    status: "PASS",
+    explanation: "No additional mandatory fields, confirmations, navigation transitions, errors, or obstacles were detected for withdrawal."
+  };
+}
+
+interface TestExecution {
+  id: string;
+  name: string;
+  expectedResult: string;
+  actualResult: string;
+  status: "PASS" | "FAIL" | "NEEDS REVIEW";
+  executionTimeMs: number;
+  failureExplanation: string | null;
+  journeyComparison?: ReturnType<typeof getEaseJourneyMetrics>;
+}
+
+function executeConsentTest(
+  id: string,
+  name: string,
+  expectedResult: string,
+  test: (db: DatabaseSync) => string
+): TestExecution {
+  const started = performance.now();
+  const db = createDatabase(":memory:");
+  try {
+    const actualResult = test(db);
+    return {
+      id,
+      name,
+      expectedResult,
+      actualResult,
+      status: "PASS",
+      executionTimeMs: Math.round((performance.now() - started) * 100) / 100,
+      failureExplanation: null
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected test failure.";
+    return {
+      id,
+      name,
+      expectedResult,
+      actualResult: message,
+      status: "FAIL",
+      executionTimeMs: Math.round((performance.now() - started) * 100) / 100,
+      failureExplanation: message
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runConsentTests(config: WithdrawalJourneyConfig, selectedId?: string): TestExecution[] {
+  const testDefinitions: Array<{
+    id: string;
+    name: string;
+    expected: string;
+    run: (db: DatabaseSync) => string;
+  }> = [
+    {
+      id: "grant",
+      name: "Consent can be granted successfully",
+      expected: "A pending request transitions to active.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        const granted = actionConsent(db, request.id, "grant");
+        assert.equal(granted.status, "active");
+        return `Grant returned status '${granted.status}'.`;
+      }
+    },
+    {
+      id: "withdraw",
+      name: "Consent can be withdrawn successfully",
+      expected: "An active consent transitions to withdrawn.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        const withdrawn = actionConsent(db, request.id, "withdraw");
+        assert.equal(withdrawn.status, "withdrawn");
+        return `Withdrawal returned status '${withdrawn.status}'.`;
+      }
+    },
+    {
+      id: "access-after-withdrawal",
+      name: "Data access stops immediately after withdrawal",
+      expected: "The same purpose/category access request is denied after withdrawal.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        actionConsent(db, request.id, "withdraw");
+        const decision = evaluateAccess(db, {
+          userId: demoUsers[1].id,
+          organizationId: demoOrganization.id,
+          purposeId: "PUR-LOCATION",
+          dataCategory: "Personalisation"
+        });
+        assert.equal(decision.decision, "denied");
+        assert.equal(decision.consentStatus, "withdrawn");
+        const auditId = recordAccessAttempt(db, decision);
+        assert.ok(auditId > 0);
+        return `Access was '${decision.decision}' with consent '${decision.consentStatus}'; denial audit #${auditId} recorded.`;
+      }
+    },
+    {
+      id: "no-consent",
+      name: "Access without consent is denied",
+      expected: "No matching consent produces a denied decision.",
+      run: (db) => {
+        const decision = evaluateAccess(db, {
+          userId: demoUsers[1].id,
+          organizationId: demoOrganization.id,
+          purposeId: "PUR-LOCATION",
+          dataCategory: "Personalisation"
+        });
+        assert.equal(decision.decision, "denied");
+        assert.equal(decision.consentStatus, "not_found");
+        return `Access was '${decision.decision}' with consent '${decision.consentStatus}'.`;
+      }
+    },
+    {
+      id: "purpose-mismatch",
+      name: "Purpose and data-category mismatches are denied",
+      expected: "Consent for a different purpose or data category cannot authorize the request.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        const decision = evaluateAccess(db, {
+          userId: demoUsers[1].id,
+          organizationId: demoOrganization.id,
+          purposeId: "PUR-RECOMMENDATIONS",
+          dataCategory: "Personalisation"
+        });
+        assert.equal(decision.decision, "denied");
+        assert.equal(decision.consentStatus, "not_found");
+        const categoryMismatch = evaluateAccess(db, {
+          userId: demoUsers[1].id,
+          organizationId: demoOrganization.id,
+          purposeId: "PUR-LOCATION",
+          dataCategory: "Security"
+        });
+        assert.equal(categoryMismatch.decision, "denied");
+        assert.match(categoryMismatch.reason, /not the requested/);
+        return `Purpose mismatch: ${decision.reason} Category mismatch: ${categoryMismatch.reason}`;
+      }
+    },
+    {
+      id: "expired",
+      name: "Expired consent is denied",
+      expected: "An expired consent cannot authorize access.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        const expiredAt = new Date(Date.now() - 1_000).toISOString();
+        db.prepare("UPDATE consents SET expires_at = ? WHERE id = ?").run(expiredAt, request.id);
+        synchronizeExpiredConsents(db);
+        const decision = evaluateAccess(db, {
+          userId: demoUsers[1].id,
+          organizationId: demoOrganization.id,
+          purposeId: "PUR-LOCATION",
+          dataCategory: "Personalisation"
+        });
+        assert.equal(decision.decision, "denied");
+        assert.equal(decision.consentStatus, "expired");
+        return `Expired consent status '${decision.consentStatus}' produced '${decision.decision}'.`;
+      }
+    },
+    {
+      id: "audit-history",
+      name: "Grant and withdrawal appear in audit history",
+      expected: "Append-only history contains both grant and withdrawal events.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        actionConsent(db, request.id, "withdraw");
+        const events = eventHistory(db, request.id) as Array<{ eventType: string }>;
+        assert.ok(events.some((event) => event.eventType === "granted"));
+        assert.ok(events.some((event) => event.eventType === "withdrawn"));
+        return `History contains ${events.map((event) => event.eventType).join(", ")}.`;
+      }
+    },
+    {
+      id: "repeated-withdrawal",
+      name: "Repeated withdrawal preserves canonical state",
+      expected: "A second withdrawal is rejected; state stays withdrawn with no duplicate event.",
+      run: (db) => {
+        const request = createPendingConsent(db, demoUsers[1].id, demoOrganization.id, "PUR-LOCATION", new Date(Date.now() + 86_400_000).toISOString());
+        actionConsent(db, request.id, "grant");
+        actionConsent(db, request.id, "withdraw");
+        const before = db.prepare("SELECT COUNT(*) AS count FROM consent_events WHERE consent_id = ? AND event_type = 'withdrawn'").get(request.id) as { count: number };
+        assert.throws(() => actionConsent(db, request.id, "withdraw"), /Cannot withdraw/);
+        const after = db.prepare("SELECT COUNT(*) AS count FROM consent_events WHERE consent_id = ? AND event_type = 'withdrawn'").get(request.id) as { count: number };
+        assert.equal(getConsent(db, request.id)?.status, "withdrawn");
+        assert.equal(after.count, before.count);
+        return `Second withdrawal was rejected; status remains withdrawn and event count remains ${after.count}.`;
+      }
+    }
+  ];
+  const selected = selectedId ? testDefinitions.filter(({ id }) => id === selectedId) : testDefinitions;
+  if (selectedId && selected.length === 0 && selectedId !== "withdrawal-ease") {
+    throw new ApiError(400, "Unknown testId.");
+  }
+  const results = selected.map(({ id, name, expected, run }) =>
+    executeConsentTest(id, name, expected, run));
+  if (!selectedId || selectedId === "withdrawal-ease") {
+    const started = performance.now();
+    const journeyComparison = getEaseJourneyMetrics(config);
+    results.push({
+      id: "withdrawal-ease",
+      name: "Withdrawal requires no unjustified extra steps",
+      expectedResult: "Withdrawal has no extra mandatory field, confirmation, navigation, error, or obstacle versus the grant journey.",
+      actualResult: `Grant: ${grantJourneySummary(journeyComparison.grant)} Withdrawal: ${grantJourneySummary(journeyComparison.withdrawal)} ${journeyComparison.explanation}`,
+      status: journeyComparison.status,
+      executionTimeMs: Math.round((performance.now() - started) * 100) / 100,
+      failureExplanation: journeyComparison.status === "PASS" ? null : journeyComparison.explanation,
+      journeyComparison
+    });
+  }
+  return results;
+}
+
+function grantJourneySummary(metrics: EaseJourneyMetrics): string {
+  return `${metricCount(metrics.clicks, "click")}; ${metricCount(metrics.navigationTransitions, "navigation transition")}; ${metricCount(metrics.mandatoryFields, "mandatory field")}; ${metricCount(metrics.additionalConfirmations, "confirmation")}; ${metricCount(metrics.unnecessaryObstacles, "obstacle")}; ${metricCount(metrics.errors, "error")}.`;
+}
+
+function metricCount(value: number, label: string): string {
+  return `${value} ${label}${value === 1 ? "" : "s"}`;
+}
+
 export function createApp(db: DatabaseSync) {
   const app = express();
   app.use(express.json({ limit: "16kb", strict: true }));
@@ -256,6 +615,71 @@ export function createApp(db: DatabaseSync) {
 
   app.get("/api/demo-context", (_request, response) => {
     response.json({ data: { user: demoUser, users: demoUsers, organization: demoOrganization, purposes: demoPurposes } });
+  });
+
+  app.get("/api/dashboard/stats", (_request, response) => {
+    response.json({ data: getDashboardStats(db) });
+  });
+
+  app.post("/api/demo/reset", (_request, response) => {
+    resetDemoData(db);
+    response.json({
+      data: {
+        message: "Synthetic demo data restored. Consent and access audit history was retained.",
+        stats: getDashboardStats(db)
+      }
+    });
+  });
+
+  app.get("/api/test-lab/results", (request, response) => {
+    const rawLimit = request.query.limit;
+    const limit = rawLimit === undefined ? 50 : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new ApiError(400, "limit must be an integer between 1 and 100.");
+    }
+    response.json({ data: getTestLabResults(db, undefined, limit) });
+  });
+
+  app.get("/api/test-lab/config", (_request, response) => {
+    response.json({ data: getWithdrawalJourneyConfig(db) });
+  });
+
+  app.put("/api/test-lab/config", (request, response) => {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+      !["extraNavigation", "mandatoryField", "extraConfirmation", "unnecessaryError"]
+        .every((key) => typeof body[key] === "boolean")) {
+      throw new ApiError(400, "Provide boolean values for all withdrawal journey scenario settings.");
+    }
+    const config: WithdrawalJourneyConfig = {
+      extraNavigation: body.extraNavigation as boolean,
+      mandatoryField: body.mandatoryField as boolean,
+      extraConfirmation: body.extraConfirmation as boolean,
+      unnecessaryError: body.unnecessaryError as boolean
+    };
+    setWithdrawalJourneyConfig(db, config);
+    response.json({ data: config });
+  });
+
+  app.post("/api/test-lab/run", (request, response) => {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new ApiError(400, "Request body must be a JSON object.");
+    }
+    const testId = body.testId === undefined ? undefined : requiredString(body.testId, "testId");
+    const config = getWithdrawalJourneyConfig(db);
+    const executedResults = runConsentTests(config, testId);
+    const results = saveTestLabResults(db, randomUUID(), executedResults.map((result) => ({
+      testId: result.id,
+      name: result.name,
+      expectedResult: result.expectedResult,
+      actualResult: result.actualResult,
+      status: result.status,
+      executionTimeMs: result.executionTimeMs,
+      failureExplanation: result.failureExplanation,
+      journeyComparison: result.journeyComparison
+    })));
+    response.json({ data: { results, config } });
   });
 
   app.get("/api/consents", (request, response) => {
@@ -333,30 +757,9 @@ export function createApp(db: DatabaseSync) {
     const organizationId = requiredString(body.organizationId, "organizationId");
     const purposeId = requiredString(body.purposeId, "purposeId");
     const expiresAt = optionalExpiry(body.expiresAt);
-    const exists = db.prepare(`
-      SELECT
-        EXISTS(SELECT 1 FROM users WHERE id = ?) AS userExists,
-        EXISTS(SELECT 1 FROM organizations WHERE id = ?) AS organizationExists,
-        EXISTS(SELECT 1 FROM purposes WHERE id = ?) AS purposeExists
-    `).get(userId, organizationId, purposeId) as { userExists: number; organizationExists: number; purposeExists: number };
-    if (!exists.userExists || !exists.organizationExists || !exists.purposeExists) {
-      throw new ApiError(400, "userId, organizationId, and purposeId must reference the synthetic demo data.");
-    }
-    const current = currentConsent(db, { userId, organizationId, purposeId });
-    if (current?.status === "pending" || current?.status === "active") {
-      throw new ApiError(409, `A ${current.status} consent already exists for this purpose.`);
-    }
-    const id = `CNS-${randomUUID()}`;
-    const now = new Date().toISOString();
-    const create = () => withTransaction(db, () => {
-      db.prepare(`
-        INSERT INTO consents (id, user_id, organization_id, purpose_id, status, created_at, updated_at, expires_at)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
-      `).run(id, userId, organizationId, purposeId, now, now, expiresAt);
-      appendEvent(db, id, "requested", "Consent request created.");
+    response.status(201).json({
+      data: createPendingConsent(db, userId, organizationId, purposeId, expiresAt)
     });
-    create();
-    response.status(201).json({ data: getConsent(db, id) });
   });
 
   app.get("/api/consents/:id/history", (request, response) => {
@@ -367,7 +770,7 @@ export function createApp(db: DatabaseSync) {
 
   app.get("/api/consents/:id", (request, response) => {
     const consent = getConsent(db, request.params.id);
-    if (!consent) throw new ApiError(404, "Consent request not found.");
+    if (!consent || consent.archivedAt) throw new ApiError(404, "Consent request not found.");
     response.json({ data: consent });
   });
 

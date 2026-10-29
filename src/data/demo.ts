@@ -1,5 +1,3 @@
-import type { TestResult } from "../types";
-
 export const demoUser = {
   name: "Aarav Mehta",
   initials: "AM",
@@ -33,27 +31,3 @@ export const demoPurposes = [
 ];
 
 export const demoDataCategories = [...new Set(demoPurposes.map((purpose) => purpose.category))];
-
-export const initialTestResults: TestResult[] = [
-  {
-    id: "TST-0082",
-    name: "Withdrawal blocks future access",
-    result: "Passed",
-    detail: "Access correctly denied after consent withdrawal.",
-    time: "Today, 10:42 AM"
-  },
-  {
-    id: "TST-0081",
-    name: "Purpose limitation check",
-    result: "Passed",
-    detail: "Data use matched the consented purpose.",
-    time: "Today, 10:39 AM"
-  },
-  {
-    id: "TST-0080",
-    name: "Expired consent enforcement",
-    result: "Failed",
-    detail: "An expired consent was accepted by the mock service.",
-    time: "Yesterday, 4:18 PM"
-  }
-];

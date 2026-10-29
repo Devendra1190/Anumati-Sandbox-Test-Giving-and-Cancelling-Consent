@@ -18,7 +18,7 @@ export default function ConsentTable({ records, onViewAll, title = "Recent conse
         <div className="empty-state">
           <div className="empty-icon"><ShieldCheck size={21} /></div>
           <strong>No consent records found</strong>
-          <p>Try changing the filters or grant a new consent in the playground.</p>
+          <p>Create a synthetic consent request in the playground to see its current status here.</p>
         </div>
       ) : (
         <div className="table-scroll">

@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   ArrowDownRight,
   ArrowRight,
-  ArrowUpRight,
   Check,
   CheckCircle2,
   Clock3,
@@ -20,20 +19,35 @@ import {
   XCircle
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { checkMockDataAccess, createConsentRequest, getConsentHistory, getConsents, requestMockDataAccess, transitionConsent } from "./api";
+import { checkMockDataAccess, createConsentRequest, getConsentHistory, getConsents, getDashboardStats, getTestResults, requestMockDataAccess, resetDemoData, runAutomatedTests, transitionConsent, getTestLabConfig, updateTestLabConfig } from "./api";
 import ConsentTable from "./components/ConsentTable";
 import Sidebar from "./components/Sidebar";
 import StatCard from "./components/StatCard";
 import Topbar from "./components/Topbar";
-import { demoDataCategories, demoOrganisation, demoPurposes, demoUser, demoUsers, initialTestResults } from "./data/demo";
-import type { AccessResponse, ConsentEvent, ConsentRecord, ConsentStatus, Section, TestResult } from "./types";
+import { demoDataCategories, demoOrganisation, demoPurposes, demoUser, demoUsers } from "./data/demo";
+import type { AccessResponse, ConsentEvent, ConsentRecord, ConsentStatus, DashboardStats, Section, TestLabConfig, TestResult } from "./types";
 
 function App() {
+  const defaultTestConfig: TestLabConfig = {
+    extraNavigation: false,
+    mandatoryField: false,
+    extraConfirmation: false,
+    unnecessaryError: false
+  };
   const [section, setSection] = useState<Section>("Dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [consents, setConsents] = useState<ConsentRecord[]>([]);
   const [consentEvents, setConsentEvents] = useState<ConsentEvent[]>([]);
-  const [testResults, setTestResults] = useState<TestResult[]>(initialTestResults);
+  const [testResults, setTestResults] = useState<TestResult[]>([]);
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats>({
+    active: 0, withdrawn: 0, tests: 0, passed: 0, failed: 0, needsReview: 0, activity: []
+  });
+  const [testConfig, setTestConfig] = useState<TestLabConfig>(defaultTestConfig);
+  const [testRunning, setTestRunning] = useState(false);
+  const [scenarioSaving, setScenarioSaving] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [apiSuccess, setApiSuccess] = useState("");
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [accessPurpose, setAccessPurpose] = useState(demoPurposes[0].id);
@@ -43,43 +57,61 @@ function App() {
   const [apiError, setApiError] = useState("");
   const [apiLoading, setApiLoading] = useState(true);
 
-  const refreshConsentData = useCallback(async () => {
-    const [records, events] = await Promise.all([getConsents(), getConsentHistory()]);
-    setConsents(records);
-    setConsentEvents(events);
-    setApiLoading(false);
+  const refreshApplicationData = useCallback(async () => {
+    try {
+      const [records, events, stats, results, config] = await Promise.all([
+        getConsents(),
+        getConsentHistory(),
+        getDashboardStats(),
+        getTestResults(),
+        getTestLabConfig()
+      ]);
+      setConsents(records);
+      setConsentEvents(events);
+      setDashboardStats(stats);
+      setTestResults(results);
+      setTestConfig(config);
+    } finally {
+      setApiLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    refreshConsentData().catch((error: unknown) => {
-      setApiError(error instanceof Error ? error.message : "Unable to load consent data.");
-      setApiLoading(false);
+    refreshApplicationData().catch((error: unknown) => {
+      setApiError(error instanceof Error ? error.message : "Unable to load sandbox data.");
     });
-  }, [refreshConsentData]);
+  }, [refreshApplicationData]);
 
-  const counts = useMemo(() => ({
-    active: consents.filter((consent) => consent.status === "active").length,
-    withdrawn: consents.filter((consent) => consent.status === "withdrawn").length,
-    tests: testResults.length,
-    failed: testResults.filter((test) => test.result === "Failed").length
-  }), [consents, testResults]);
+  useEffect(() => {
+    if (!apiSuccess) return;
+    const timer = window.setTimeout(() => setApiSuccess(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [apiSuccess]);
 
-  async function performConsentAction(action: () => Promise<unknown>) {
+  async function performConsentAction(action: () => Promise<unknown>, successMessage: string) {
     setApiError("");
+    setApiSuccess("");
+    setActionBusy(true);
     try {
       await action();
-      await refreshConsentData();
+      await refreshApplicationData();
+      setApiSuccess(successMessage);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to update consent.");
+    } finally {
+      setActionBusy(false);
     }
   }
 
   function createRequest(purposeId: string) {
-    return performConsentAction(() => createConsentRequest(purposeId));
+    const purpose = demoPurposes.find((item) => item.id === purposeId)?.name ?? "consent";
+    return performConsentAction(() => createConsentRequest(purposeId), `Consent request created for ${purpose}.`);
   }
 
   function updateConsent(id: string, action: "grant" | "reject" | "withdraw") {
-    return performConsentAction(() => transitionConsent(id, action));
+    const successMessage = action === "grant" ? "Consent granted and saved." :
+      action === "withdraw" ? "Consent withdrawn. Future access is blocked." : "Consent request rejected.";
+    return performConsentAction(() => transitionConsent(id, action), successMessage);
   }
 
   function getAccessInput() {
@@ -88,58 +120,97 @@ function App() {
 
   async function checkAccess() {
     setApiError("");
+    setApiSuccess("");
+    setActionBusy(true);
     try {
       setAccessResult(await checkMockDataAccess(getAccessInput()));
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to evaluate this request.");
+    } finally {
+      setActionBusy(false);
     }
   }
 
   async function requestAccess() {
     setApiError("");
+    setApiSuccess("");
+    setActionBusy(true);
     try {
-      setAccessResult(await requestMockDataAccess(getAccessInput()));
-      await refreshConsentData();
+      const response = await requestMockDataAccess(getAccessInput());
+      setAccessResult(response);
+      await refreshApplicationData();
+      setApiSuccess(response.httpStatus === 200 ?
+        "Mock data request allowed and recorded in the audit history." :
+        "Access denied as expected; no protected mock data was returned.");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to request mock data.");
+    } finally {
+      setActionBusy(false);
     }
   }
 
-  function runTest(name?: string) {
-    const testNames = [
-      "Withdrawal blocks future access",
-      "Purpose limitation check",
-      "Consent expiry enforcement",
-      "Consent record integrity"
-    ];
-    const selectedTests = name ? [name] : testNames;
-    setTestResults((current) => [
-      ...selectedTests.map((selected, index): TestResult => {
-        const failed = selected === "Consent expiry enforcement";
-        return {
-          id: `TST-${String(83 + current.length - initialTestResults.length + index).padStart(4, "0")}`,
-          name: selected,
-          result: failed ? "Failed" : "Passed",
-          detail: failed ? "An expired consent was accepted by the mock service." : "The simulated consent checks behaved as expected.",
-          time: "Just now"
-        };
-      }),
-      ...current
-    ]);
+  async function runTest(testId?: string) {
+    setApiError("");
+    setTestRunning(true);
+    try {
+      const response = await runAutomatedTests(testId);
+      setTestConfig(response.config);
+      await refreshApplicationData();
+      const passes = response.results.filter((result) => result.status === "PASS").length;
+      const failures = response.results.filter((result) => result.status === "FAIL").length;
+      const reviews = response.results.filter((result) => result.status === "NEEDS REVIEW").length;
+      setApiSuccess(`${response.results.length} test${response.results.length === 1 ? "" : "s"} completed: ${passes} passed, ${failures} failed, ${reviews} need review.`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to run the automated tests.");
+    } finally {
+      setTestRunning(false);
+    }
+  }
+
+  async function changeTestConfig(config: TestLabConfig) {
+    setApiError("");
+    setApiSuccess("");
+    setScenarioSaving(true);
+    try {
+      setTestConfig(await updateTestLabConfig(config));
+      setApiSuccess("Withdrawal journey scenario saved.");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to update the withdrawal scenario.");
+    } finally {
+      setScenarioSaving(false);
+    }
+  }
+
+  async function resetDemo() {
+    setApiError("");
+    setApiSuccess("");
+    setResetting(true);
+    try {
+      const response = await resetDemoData();
+      setAccessResult(null);
+      setFilter("all");
+      setSearch("");
+      await refreshApplicationData();
+      setApiSuccess(response.message);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to reset the synthetic demo data.");
+    } finally {
+      setResetting(false);
+    }
   }
 
   function renderPage() {
     switch (section) {
       case "Consent Playground":
-        return <PlaygroundPage consents={consents} onCreateRequest={createRequest} onUpdate={updateConsent} />;
+        return <PlaygroundPage consents={consents} onCreateRequest={createRequest} onUpdate={updateConsent} busy={actionBusy || resetting} />;
       case "Data Access Simulator":
-        return <AccessPage userId={accessUser} onUserChange={(value) => { setAccessUser(value); setAccessResult(null); }} category={accessCategory} onCategoryChange={(value) => { setAccessCategory(value); setAccessResult(null); }} purpose={accessPurpose} onPurposeChange={(value) => { setAccessPurpose(value); setAccessResult(null); }} result={accessResult} onCheck={checkAccess} onRequest={requestAccess} />;
+        return <AccessPage userId={accessUser} onUserChange={(value) => { setAccessUser(value); setAccessResult(null); }} category={accessCategory} onCategoryChange={(value) => { setAccessCategory(value); setAccessResult(null); }} purpose={accessPurpose} onPurposeChange={(value) => { setAccessPurpose(value); setAccessResult(null); }} result={accessResult} onCheck={checkAccess} onRequest={requestAccess} busy={actionBusy || resetting} />;
       case "Automated Test Lab":
-        return <TestLabPage results={testResults} onRun={runTest} failed={counts.failed} />;
+        return <TestLabPage results={testResults} onRun={runTest} stats={dashboardStats} config={testConfig} onConfigChange={changeTestConfig} running={testRunning || scenarioSaving || resetting} />;
       case "Consent History":
         return <HistoryPage events={consentEvents} filter={filter} onFilterChange={setFilter} search={search} onSearchChange={setSearch} />;
       default:
-        return <DashboardPage counts={counts} consents={consents} onNavigate={setSection} results={testResults} />;
+        return <DashboardPage stats={dashboardStats} consents={consents} onNavigate={setSection} results={testResults} onReset={resetDemo} resetting={resetting} />;
     }
   }
 
@@ -149,41 +220,46 @@ function App() {
       <main className="main-area">
         <Topbar current={section} onMenuClick={() => setMobileOpen(true)} />
         <div className="page-content">
-          {apiError && <div className="api-error" role="alert"><ShieldAlert size={16} /><span>{apiError}</span><button onClick={() => { setApiError(""); setApiLoading(true); refreshConsentData().catch((error: unknown) => { setApiError(error instanceof Error ? error.message : "Unable to load consent data."); setApiLoading(false); }); }}>Retry</button></div>}
-          {apiLoading && <div className="api-loading" role="status">Connecting to the consent sandbox…</div>}
+          {apiError && <div className="api-error" role="alert"><ShieldAlert size={16} /><span>{apiError}</span><button onClick={() => { setApiError(""); setApiLoading(true); refreshApplicationData().catch((error: unknown) => setApiError(error instanceof Error ? error.message : "Unable to reload sandbox data.")); }}>Retry loading</button></div>}
+          {apiSuccess && <div className="api-success" role="status" aria-live="polite"><CheckCircle2 size={16} /><span>{apiSuccess}</span><button aria-label="Dismiss notification" onClick={() => setApiSuccess("")}>Dismiss</button></div>}
+          {apiLoading && <div className="api-loading" role="status" aria-live="polite">Loading live synthetic data from the local consent sandbox…</div>}
           {renderPage()}
         </div>
-        <footer className="page-footer"><span>© 2026 Anumati Sandbox</span><span><span className="footer-dot" /> Synthetic demo data · Not connected to real accounts</span><button onClick={() => setSection("Dashboard")}>DPDP Act, 2023 <ArrowUpRight size={13} /></button></footer>
+        <footer className="page-footer"><span>© 2026 Anumati Sandbox</span><span><span className="footer-dot" /> Synthetic demo data · Not connected to real accounts</span><span className="footer-disclaimer">Not a regulated Consent Manager</span></footer>
       </main>
     </div>
   );
 }
 
 interface DashboardPageProps {
-  counts: { active: number; withdrawn: number; tests: number; failed: number };
+  stats: DashboardStats;
   consents: ConsentRecord[];
   onNavigate: (section: Section) => void;
   results: TestResult[];
+  onReset: () => void;
+  resetting: boolean;
 }
 
-function DashboardPage({ counts, consents, onNavigate, results }: DashboardPageProps) {
+function DashboardPage({ stats, consents, onNavigate, results, onReset, resetting }: DashboardPageProps) {
+  const maximumActivity = Math.max(1, ...stats.activity.map((day) => day.grants + day.withdrawals));
+  const chartScale = Math.ceil(maximumActivity / 4) * 4;
   return (
     <>
       <div className="page-heading">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> OVERVIEW</div><h1>Good morning, Aarav <span className="wave">✦</span></h1><p>Here&apos;s what&apos;s happening with consent in your sandbox today.</p></div>
-        <button className="button button-primary" onClick={() => onNavigate("Consent Playground")}><Plus size={17} /> New consent</button>
+        <div><div className="eyebrow"><span className="eyebrow-line" /> OVERVIEW</div><h1>Good morning, Aarav <span className="wave" aria-hidden="true">✦</span></h1><p>Live consent and test data from your local sandbox.</p></div>
+        <div className="dashboard-actions"><button className="button button-secondary" onClick={onReset} disabled={resetting} title="Restore synthetic sample data and keep the audit trail"><RotateCcw size={15} /> {resetting ? "Resetting…" : "Reset demo"}</button><button className="button button-primary" onClick={() => onNavigate("Consent Playground")}><Plus size={17} /> New consent</button></div>
       </div>
       <div className="demo-banner">
         <div className="demo-banner-icon"><Sparkles size={17} /></div>
-        <div><strong>You&apos;re exploring a demo workspace</strong><p>Every person, organisation, and record here is synthetic. Feel free to experiment — changes won&apos;t affect real data.</p></div>
+        <div><strong>You&apos;re exploring a test sandbox</strong><p>People, organisations, and consent records are synthetic. This application is not a regulated Consent Manager.</p></div>
         <span className="demo-banner-tag">DEMO DATA</span>
       </div>
 
       <section className="stats-grid" aria-label="Consent statistics">
-        <StatCard label="Active consents" value={counts.active} helper="+2 this month" icon={ShieldCheck} tone="teal" />
-        <StatCard label="Withdrawn consents" value={counts.withdrawn} helper="All withdrawals honoured" icon={ArrowDownRight} tone="blue" />
-        <StatCard label="Tests executed" value={counts.tests} helper="+12% from last week" icon={FlaskConical} tone="amber" />
-        <StatCard label="Failed tests" value={counts.failed} helper={counts.failed ? "Needs your attention" : "All clear"} icon={ShieldAlert} tone="rose" />
+        <StatCard label="Active consents" value={stats.active} helper="Current synthetic records" icon={ShieldCheck} tone="teal" />
+        <StatCard label="Withdrawn consents" value={stats.withdrawn} helper="Current synthetic records" icon={ArrowDownRight} tone="blue" />
+        <StatCard label="Tests executed" value={stats.tests} helper="Persisted backend outcomes" icon={FlaskConical} tone="amber" />
+        <StatCard label="Failed tests" value={stats.failed} helper={stats.failed ? "Review the Test Lab results" : "No recorded failures"} icon={ShieldAlert} tone="rose" />
       </section>
 
       <div className="dashboard-grid">
@@ -205,45 +281,42 @@ function DashboardPage({ counts, consents, onNavigate, results }: DashboardPageP
 
       <div className="lower-grid">
         <section className="panel activity-panel">
-          <div className="panel-heading"><div><h2>Consent activity</h2><p>Grant and withdrawal activity over the last 7 days</p></div><button className="period-select">Last 7 days <ChevronTiny /></button></div>
-          <div className="chart-area">
-            <div className="chart-y-labels"><span>8</span><span>6</span><span>4</span><span>2</span><span>0</span></div>
+          <div className="panel-heading"><div><h2>Consent activity</h2><p>Recorded grants and withdrawals over the last 7 days</p></div><span className="page-demo-badge"><span /> LIVE DATA</span></div>
+          <div className="chart-area" role="img" aria-label="Daily consent grant and withdrawal events over the last seven days">
+            <div className="chart-y-labels" aria-hidden="true">{[4, 3, 2, 1, 0].map((step) => <span key={step}>{Math.round(chartScale * step / 4)}</span>)}</div>
             <div className="chart-content">
               <div className="chart-grid-lines"><i /><i /><i /><i /><i /></div>
               <div className="bar-chart">
-                {[["Mon", 42, 16], ["Tue", 66, 22], ["Wed", 48, 12], ["Thu", 82, 25], ["Fri", 58, 12], ["Sat", 36, 10], ["Sun", 72, 18]].map(([day, grant, withdraw]) => (
-                  <div className="bar-group" key={day}>
-                    <div className="bar-stack"><i className="bar-granted" style={{ height: `${grant}%` }} /><i className="bar-withdrawn" style={{ height: `${withdraw}%` }} /></div>
-                    <span>{day}</span>
+                {stats.activity.map((day) => (
+                  <div className="bar-group" key={day.date} aria-label={`${day.date}: ${day.grants} grants, ${day.withdrawals} withdrawals`}>
+                    <div className="bar-stack"><i className="bar-granted" style={{ height: `${day.grants / chartScale * 80}%` }} /><i className="bar-withdrawn" style={{ height: `${day.withdrawals / chartScale * 80}%` }} /></div>
+                    <span>{day.label}</span>
                   </div>
                 ))}
               </div>
             </div>
           </div>
-          <div className="chart-legend"><span><i className="legend-granted" /> Granted</span><span><i className="legend-withdrawn" /> Withdrawn</span><span className="chart-demo-label">Illustrative demo data</span></div>
+          <div className="chart-legend"><span><i className="legend-granted" /> Granted</span><span><i className="legend-withdrawn" /> Withdrawn</span><span className="chart-demo-label">Append-only SQLite events</span></div>
         </section>
         <section className="panel test-summary">
           <div className="panel-heading"><div><h2>Latest test runs</h2><p>Quality checks in your sandbox</p></div><button className="text-button" onClick={() => onNavigate("Automated Test Lab")}>Test lab <ArrowRight size={14} /></button></div>
-          <div className="test-list">
-            {results.slice(0, 3).map((test) => <div className="test-row" key={test.id}><span className={`test-result-icon ${test.result === "Passed" ? "test-passed" : "test-failed"}`}>{test.result === "Passed" ? <Check size={14} /> : <XCircle size={15} />}</span><div className="test-row-copy"><strong>{test.name}</strong><small>{test.time}</small></div><span className={`test-result-label ${test.result.toLowerCase()}`}>{test.result}</span></div>)}
-          </div>
+          {results.length === 0 ? <div className="dashboard-empty"><FlaskConical size={18} /><span>No test results yet. Run the suite in the Test Lab.</span></div> : <div className="test-list">
+            {results.slice(0, 3).map((test) => <div className="test-row" key={test.id}><span className={`test-result-icon ${test.status === "PASS" ? "test-passed" : test.status === "FAIL" ? "test-failed" : "test-needs-review"}`}>{test.status === "PASS" ? <Check size={14} /> : test.status === "FAIL" ? <XCircle size={15} /> : <Activity size={14} />}</span><div className="test-row-copy"><strong>{test.name}</strong><small>{test.executionTimeMs} ms · {formatEventDate(test.executedAt)}</small></div><span className={`test-result-label ${test.status.toLowerCase().replace(" ", "-")}`}>{test.status}</span></div>)}
+          </div>}
         </section>
       </div>
     </>
   );
 }
 
-function ChevronTiny() {
-  return <ArrowDownRight size={13} className="rotate-chevron" />;
-}
-
 interface PlaygroundPageProps {
   consents: ConsentRecord[];
   onCreateRequest: (purposeId: string) => void;
   onUpdate: (id: string, action: "grant" | "reject" | "withdraw") => void;
+  busy: boolean;
 }
 
-function PlaygroundPage({ consents, onCreateRequest, onUpdate }: PlaygroundPageProps) {
+function PlaygroundPage({ consents, onCreateRequest, onUpdate, busy }: PlaygroundPageProps) {
   const descriptions: Record<string, { description: string; icon: LucideIcon }> = {
     "PUR-RECOMMENDATIONS": { description: "Use your preferences to tailor suggestions and experiences.", icon: Sparkles },
     "PUR-STATEMENTS": { description: "Send account summaries and service-related updates.", icon: FileCheck2 },
@@ -262,7 +335,7 @@ function PlaygroundPage({ consents, onCreateRequest, onUpdate }: PlaygroundPageP
             const active = record?.status === "active";
             const pending = record?.status === "pending";
             const { description, icon: Icon } = descriptions[purposeId];
-            return <article className="preference-row" key={purposeId}><div className="preference-icon"><Icon size={18} /></div><div className="preference-copy"><strong>{purpose}</strong><span>{description}</span><small>{category}{record ? ` · ${record.id} · ${record.status}` : ""}</small></div><div className="consent-actions">{active ? <button className="button button-secondary" onClick={() => onUpdate(record.id, "withdraw")}>Withdraw</button> : pending ? <><button className="button button-secondary" onClick={() => onUpdate(record.id, "reject")}>Reject</button><button className="button button-primary" onClick={() => onUpdate(record.id, "grant")}>Grant</button></> : <button className="button button-secondary" onClick={() => onCreateRequest(purposeId)}>{record ? "Request again" : "Create request"}</button>}</div></article>;
+            return <article className="preference-row" key={purposeId}><div className="preference-icon"><Icon size={18} /></div><div className="preference-copy"><strong>{purpose}</strong><span>{description}</span><small>{category}{record ? ` · ${record.id} · ${record.status}` : ""}</small></div><div className="consent-actions">{active ? <button className="button button-secondary" disabled={busy} onClick={() => onUpdate(record.id, "withdraw")}>Withdraw</button> : pending ? <><button className="button button-secondary" disabled={busy} onClick={() => onUpdate(record.id, "reject")}>Reject</button><button className="button button-primary" disabled={busy} onClick={() => onUpdate(record.id, "grant")}>Grant</button></> : <button className="button button-secondary" disabled={busy} onClick={() => onCreateRequest(purposeId)}>{record ? "Request again" : "Create request"}</button>}</div></article>;
           })}</div>
           <div className="playground-foot"><LockKeyhole size={14} /><span>Withdrawals take effect immediately in this simulation.</span></div>
         </section>
@@ -283,9 +356,10 @@ interface AccessPageProps {
   result: AccessResponse | null;
   onCheck: () => void;
   onRequest: () => void;
+  busy: boolean;
 }
 
-function AccessPage({ userId, onUserChange, category, onCategoryChange, purpose, onPurposeChange, result, onCheck, onRequest }: AccessPageProps) {
+function AccessPage({ userId, onUserChange, category, onCategoryChange, purpose, onPurposeChange, result, onCheck, onRequest, busy }: AccessPageProps) {
   const user = demoUsers.find((candidate) => candidate.id === userId) ?? demoUser;
   const selectedPurpose = demoPurposes.find((candidate) => candidate.id === purpose) ?? demoPurposes[0];
   const decision = result?.body.data;
@@ -299,34 +373,58 @@ function AccessPage({ userId, onUserChange, category, onCategoryChange, purpose,
       <label className="field-label" htmlFor="access-category">DATA CATEGORY</label><select className="form-select" id="access-category" value={category} onChange={(event) => onCategoryChange(event.target.value)}>{demoDataCategories.map((value) => <option key={value} value={value}>{value}</option>)}</select>
       <label className="field-label" htmlFor="access-purpose">PROCESSING PURPOSE</label><select className="form-select" id="access-purpose" value={purpose} onChange={(event) => onPurposeChange(event.target.value)}>{demoPurposes.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>
       <div className="request-detail"><span>Data principal</span><strong>{user.name} <small>({user.id})</small></strong><span>Requested category</span><strong>{category}</strong><span>Processing purpose</span><strong>{selectedPurpose.name}</strong></div>
-      <div className="access-buttons"><button className="button button-secondary" onClick={onCheck}><ShieldCheck size={15} /> Check consent</button><button className="button button-primary access-submit" onClick={onRequest}><LockKeyhole size={15} /> Request mock data</button></div>
+      <div className="access-buttons"><button className="button button-secondary" onClick={onCheck} disabled={busy}><ShieldCheck size={15} /> {busy ? "Checking…" : "Check consent"}</button><button className="button button-primary access-submit" onClick={onRequest} disabled={busy}><LockKeyhole size={15} /> {busy ? "Requesting…" : "Request mock data"}</button></div>
     </section>
     <section className="panel access-result-panel"><div className="panel-heading"><div><h2>API response</h2><p>Access decision from the backend</p></div>{result && <span className={`http-status ${allowed ? "http-allowed" : "http-denied"}`}>HTTP {result.httpStatus}</span>}</div>
-      {!result ? <div className="result-empty"><div className="result-empty-icon"><Database size={22} /></div><strong>Ready to evaluate</strong><p>Check consent or request the protected mock data. Each access request is audited by the server.</p><div className="result-check"><span><Check size={13} /></span> Exact purpose and category check</div><div className="result-check"><span><Check size={13} /></span> Protected data returned only if authorised</div></div> : <div className={`result-outcome ${allowed ? "allowed" : "denied"}`}><div className={`outcome-icon ${allowed ? "allowed" : "denied"}`} >{allowed ? <CheckCircle2 size={26} /> : <XCircle size={26} />}</div><span className={`outcome-kicker ${allowed ? "allowed" : "denied"}`}>{allowed ? "REQUEST AUTHORISED" : "REQUEST DENIED"}</span><h3>{allowed ? "Consent is active" : "Access blocked"}</h3><p>{decision?.reason}</p><div className="outcome-record"><span>Matched consent</span><strong>{decision?.consentId ?? "None"}</strong><span>Consent status</span><strong className={allowed ? "allowed" : "denied"}>{decision?.consentStatus}</strong><span>Audit entry</span><strong>{decision?.auditId ? `#${decision.auditId}` : "Consent check only"}</strong></div><div className="api-response-json"><strong>{decision?.mockData ? "Protected mock data" : decision?.auditId ? "No protected data returned" : "Consent check response"}</strong><pre>{JSON.stringify(result.body, null, 2)}</pre></div><button className="button button-secondary" onClick={onRequest}><RotateCcw size={15} /> Retry access request</button></div>}
+      {!result ? <div className="result-empty"><div className="result-empty-icon"><Database size={22} /></div><strong>Ready to evaluate</strong><p>Check consent or request the protected mock data. Each access request is audited by the server.</p><div className="result-check"><span><Check size={13} /></span> Exact purpose and category check</div><div className="result-check"><span><Check size={13} /></span> Protected data returned only if authorised</div></div> : <div className={`result-outcome ${allowed ? "allowed" : "denied"}`} aria-live="polite"><div className={`outcome-icon ${allowed ? "allowed" : "denied"}`} >{allowed ? <CheckCircle2 size={26} /> : <XCircle size={26} />}</div><span className={`outcome-kicker ${allowed ? "allowed" : "denied"}`}>{allowed ? "REQUEST AUTHORISED" : "REQUEST DENIED"}</span><h3>{allowed ? "Consent is active" : "Access blocked"}</h3><p>{decision?.reason}</p><div className="outcome-record"><span>Matched consent</span><strong>{decision?.consentId ?? "None"}</strong><span>Consent status</span><strong className={allowed ? "allowed" : "denied"}>{decision?.consentStatus}</strong><span>Audit entry</span><strong>{decision?.auditId ? `#${decision.auditId}` : "Consent check only"}</strong></div><div className="api-response-json"><strong>{decision?.mockData ? "Protected mock data" : decision?.auditId ? "No protected data returned" : "Consent check response"}</strong><pre>{JSON.stringify(result.body, null, 2)}</pre></div><button className="button button-secondary" disabled={busy} onClick={onRequest}><RotateCcw size={15} /> Retry access request</button></div>}
     </section></div>
   </>;
 }
 
 interface TestLabPageProps {
   results: TestResult[];
-  onRun: (name?: string) => void;
-  failed: number;
+  onRun: (testId?: string) => void;
+  stats: DashboardStats;
+  config: TestLabConfig;
+  onConfigChange: (config: TestLabConfig) => void;
+  running: boolean;
 }
 
-function TestLabPage({ results, onRun, failed }: TestLabPageProps) {
+function TestLabPage({ results, onRun, stats, config, onConfigChange, running }: TestLabPageProps) {
   const cases = [
-    { name: "Withdrawal blocks future access", description: "Verify access is denied immediately after consent is withdrawn.", icon: LockKeyhole },
-    { name: "Purpose limitation check", description: "Confirm data is only used for the purpose the user approved.", icon: ShieldCheck },
-    { name: "Consent expiry enforcement", description: "Ensure expired permissions cannot authorise new requests.", icon: Clock3 },
-    { name: "Consent record integrity", description: "Check that consent records retain a clear, auditable history.", icon: FileCheck2 }
+    { id: "grant", name: "Consent can be granted successfully", description: "A pending request transitions to active.", icon: CheckCircle2 },
+    { id: "withdraw", name: "Consent can be withdrawn successfully", description: "An active consent transitions to withdrawn.", icon: ArrowDownRight },
+    { id: "access-after-withdrawal", name: "Data access stops immediately after withdrawal", description: "Retry the same request after withdrawal and verify access is denied.", icon: LockKeyhole },
+    { id: "no-consent", name: "Access without consent is denied", description: "No matching consent must produce a denied decision.", icon: ShieldAlert },
+    { id: "purpose-mismatch", name: "Purpose and data-category mismatches are denied", description: "Consent for one purpose or category cannot authorize another.", icon: ShieldCheck },
+    { id: "expired", name: "Expired consent is denied", description: "An expired permission cannot authorize access.", icon: Clock3 },
+    { id: "audit-history", name: "Grant and withdrawal appear in audit history", description: "Verify both events remain in append-only history.", icon: FileCheck2 },
+    { id: "repeated-withdrawal", name: "Repeated withdrawal preserves canonical state", description: "A second withdrawal must not reactivate consent or add a duplicate event.", icon: RotateCcw },
+    { id: "withdrawal-ease", name: "Withdrawal requires no unjustified extra steps", description: "Compare actions, navigation, required fields, confirmations, obstacles, and errors.", icon: Activity }
+  ];
+  const currentJourneyResult = results.find((result) => result.testId === "withdrawal-ease")?.journeyComparison;
+  function changeScenario(key: keyof TestLabConfig, value: boolean) {
+    onConfigChange({ ...config, [key]: value });
+  }
+  const scenarioOptions: Array<{ key: keyof TestLabConfig; label: string; description: string }> = [
+    { key: "extraNavigation", label: "Add extra navigation", description: "Route withdrawal through Account Settings and Privacy Centre." },
+    { key: "mandatoryField", label: "Require an extra field", description: "Require a withdrawal explanation that granting does not request." },
+    { key: "extraConfirmation", label: "Add an extra confirmation", description: "Require a second confirmation before withdrawal." },
+    { key: "unnecessaryError", label: "Inject an unnecessary error", description: "Simulate an avoidable failure and recovery step." }
   ];
   return <>
-    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> QUALITY ASSURANCE</div><h1>Automated Test Lab</h1><p>Run consent safeguards against the synthetic sandbox environment.</p></div><button className="button button-primary" onClick={() => onRun()}><FlaskConical size={16} /> Run all tests</button></div>
-    <div className="demo-banner"><div className="demo-banner-icon"><FlaskConical size={17} /></div><div><strong>Tests run locally against mock records</strong><p>Results illustrate expected consent behaviours — they do not certify legal or regulatory compliance.</p></div><span className="demo-banner-tag">SIMULATION</span></div>
-    <div className="test-lab-stats"><div><span className="mini-stat-icon green"><CheckCircle2 size={17} /></span><span><strong>{results.filter((item) => item.result === "Passed").length}</strong><small>Passed</small></span></div><div><span className="mini-stat-icon red"><XCircle size={17} /></span><span><strong>{failed}</strong><small>Failed</small></span></div><div><span className="mini-stat-icon blue"><Activity size={17} /></span><span><strong>{results.length}</strong><small>Total runs</small></span></div></div>
-    <section className="panel test-cases-panel"><div className="panel-heading"><div><h2>Available test cases</h2><p>Run individual checks or the full test suite</p></div><span className="consent-count">{cases.length} test cases</span></div><div className="test-cases-list">{cases.map(({ name, description, icon: Icon }) => <article className="test-case-row" key={name}><span className="test-case-icon"><Icon size={18} /></span><div><strong>{name}</strong><p>{description}</p></div><button className="button button-secondary run-test-button" onClick={() => onRun(name)}>Run test <ArrowRight size={14} /></button></article>)}</div></section>
-    <section className="panel results-panel"><div className="panel-heading"><div><h2>Test run history</h2><p>Latest results from this session</p></div><span className="results-session">This session</span></div>{results.length === 0 ? <div className="empty-state"><div className="empty-icon"><FlaskConical size={21} /></div><strong>No tests have been run</strong><p>Run a test to see its results here.</p></div> : <div className="test-history">{results.map((result) => <div className="test-history-row" key={result.id}><span className={`test-result-icon ${result.result === "Passed" ? "test-passed" : "test-failed"}`}>{result.result === "Passed" ? <Check size={14} /> : <XCircle size={15} />}</span><div className="test-history-copy"><strong>{result.name}</strong><span>{result.detail}</span></div><span className={`status-badge ${result.result === "Passed" ? "status-active" : "status-failed"}`}><i />{result.result}</span><small>{result.time}</small></div>)}</div>}</section>
+    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> QUALITY ASSURANCE</div><h1>Automated Test Lab</h1><p>Run nine consent and withdrawal checks against real backend logic.</p></div><button className="button button-primary" onClick={() => onRun()} disabled={running} aria-busy={running}><FlaskConical size={16} /> {running ? "Working…" : "Run all tests"}</button></div>
+    <div className="demo-banner"><div className="demo-banner-icon"><FlaskConical size={17} /></div><div><strong>Isolated tests against application consent logic</strong><p>Each run uses temporary SQLite data and leaves the persisted demo records unchanged. This is a technical assessment, not legal certification or a DPDP compliance score.</p></div><span className="demo-banner-tag">SYNTHETIC</span></div>
+    <div className="test-lab-stats"><div><span className="mini-stat-icon green"><CheckCircle2 size={17} /></span><span><strong>{stats.passed}</strong><small>Passed total</small></span></div><div><span className="mini-stat-icon red"><XCircle size={17} /></span><span><strong>{stats.failed}</strong><small>Failed total</small></span></div><div><span className="mini-stat-icon amber"><Activity size={17} /></span><span><strong>{stats.needsReview}</strong><small>Needs review</small></span></div><div><span className="mini-stat-icon blue"><Activity size={17} /></span><span><strong>{stats.tests}</strong><small>Checks executed</small></span></div></div>
+    <section className="panel scenario-panel"><div className="panel-heading"><div><h2>Withdrawal journey scenario</h2><p>Configure realistic friction to verify the tester catches it</p></div><button className="button button-secondary" disabled={running} onClick={() => onConfigChange({ extraNavigation: false, mandatoryField: false, extraConfirmation: false, unnecessaryError: false })}><RotateCcw size={14} /> Restore normal journey</button></div><div className="scenario-options">{scenarioOptions.map(({ key, label, description }) => <label className="scenario-option" key={key}><input type="checkbox" checked={config[key]} disabled={running} onChange={(event) => changeScenario(key, event.target.checked)} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</div><p className="scenario-note">Scenario settings are stored by the backend. Run the “withdrawal ease” test after changing a setting to see PASS, FAIL, or NEEDS REVIEW.</p></section>
+    <section className="panel test-cases-panel"><div className="panel-heading"><div><h2>Available test cases</h2><p>Run an individual backend check or the complete suite</p></div><span className="consent-count">{cases.length} test cases</span></div><div className="test-cases-list">{cases.map(({ id, name, description, icon: Icon }) => <article className="test-case-row" key={id}><span className="test-case-icon"><Icon size={18} /></span><div><strong>{name}</strong><p>{description}</p></div><button className="button button-secondary run-test-button" disabled={running} onClick={() => onRun(id)}>Run test <ArrowRight size={14} /></button></article>)}</div></section>
+    {currentJourneyResult && <section className="panel journey-comparison"><div className="panel-heading"><div><h2>Journey comparison</h2><p>Measured from the configured synthetic workflow</p></div><span className={`journey-result ${currentJourneyResult.status.toLowerCase().replace(" ", "-")}`}>{currentJourneyResult.status}</span></div><div className="journey-table-wrap"><table className="journey-table"><thead><tr><th>Measure</th><th>Grant consent</th><th>Withdraw consent</th></tr></thead><tbody><tr><th>Action sequence</th><td>{currentJourneyResult.grant.actions.join(" → ")}</td><td>{currentJourneyResult.withdrawal.actions.join(" → ")}</td></tr><tr><th>User actions / clicks</th><td>{metricLabel(currentJourneyResult.grant.clicks, "click")}</td><td>{metricLabel(currentJourneyResult.withdrawal.clicks, "click")}</td></tr><tr><th>Navigation transitions</th><td>{currentJourneyResult.grant.navigationTransitions}</td><td>{currentJourneyResult.withdrawal.navigationTransitions}</td></tr><tr><th>Mandatory form fields</th><td>{currentJourneyResult.grant.mandatoryFields}</td><td>{currentJourneyResult.withdrawal.mandatoryFields}</td></tr><tr><th>Additional confirmations</th><td>{currentJourneyResult.grant.additionalConfirmations}</td><td>{currentJourneyResult.withdrawal.additionalConfirmations}</td></tr><tr><th>Unnecessary obstacles / errors</th><td>{currentJourneyResult.grant.unnecessaryObstacles} / {currentJourneyResult.grant.errors}</td><td>{currentJourneyResult.withdrawal.unnecessaryObstacles} / {currentJourneyResult.withdrawal.errors}</td></tr></tbody></table></div><p className="journey-explanation">{currentJourneyResult.explanation} Click counts alone do not establish DPDP compliance.</p></section>}
+    <section className="panel results-panel"><div className="panel-heading"><div><h2>Recent test results</h2><p>Persisted outcomes, retained across refreshes (up to 50 shown)</p></div><span className="results-session">{results.length} results loaded</span></div>{results.length === 0 ? <div className="empty-state"><div className="empty-icon"><FlaskConical size={21} /></div><strong>No tests have been run</strong><p>Run an individual test or the complete suite to see measured results.</p></div> : <div className="detailed-test-results">{results.map((result) => <article className="detailed-test-result" key={result.id}><div className="test-result-heading"><span className={`status-badge test-status-${result.status.toLowerCase().replace(" ", "-")}`}><i />{result.status}</span><strong>{result.name}</strong><small>{result.executionTimeMs.toFixed(2)} ms · {formatEventDate(result.executedAt)}</small></div><dl><div><dt>Expected</dt><dd>{result.expectedResult}</dd></div><div><dt>Actual</dt><dd>{result.actualResult}</dd></div>{result.failureExplanation && <div><dt>Explanation</dt><dd className="failure-explanation">{result.failureExplanation}</dd></div>}</dl></article>)}</div>}</section>
   </>;
+}
+
+function metricLabel(value: number, label: string): string {
+  return `${value} ${label}${value === 1 ? "" : "s"}`;
 }
 
 interface HistoryPageProps {
@@ -347,15 +445,15 @@ function HistoryPage({ events, filter, onFilterChange, search, onSearchChange }:
   return <>
     <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> AUDIT TRAIL</div><h1>Consent History</h1><p>A transparent, purpose-specific record of consent changes.</p></div><span className="page-demo-badge"><span /> Demo records</span></div>
     <div className="demo-banner"><div className="demo-banner-icon"><HistoryIcon /></div><div><strong>Append-only consent audit trail</strong><p>Every request and status change is timestamped in SQLite. This synthetic demo history is not a legally binding record.</p></div><span className="demo-banner-tag">SYNTHETIC</span></div>
-    <section className="panel history-panel"><div className="history-toolbar"><div><h2>Consent &amp; access events</h2><p>{visibleEvents.length} {visibleEvents.length === 1 ? "event" : "events"} in this view</p></div><div className="history-controls"><label className="search-field"><SearchIcon /><input aria-label="Search consent events" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search events..." /></label><select className="filter-select" aria-label="Filter by event type" value={filter} onChange={(event) => onFilterChange(event.target.value)}><option value="all">All events</option><option value="requested">Requested</option><option value="granted">Granted</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="expired">Expired</option><option value="access_allowed">Access allowed</option><option value="access_denied">Access denied</option></select></div></div>
-      {visibleEvents.length === 0 ? <div className="empty-state"><div className="empty-icon"><HistoryIcon /></div><strong>No consent or access events found</strong><p>Try changing your search or event filter.</p></div> : <div className="table-scroll"><table className="consent-table event-table"><thead><tr><th>EVENT</th><th>PROCESSING PURPOSE</th><th>DATA CATEGORY</th><th>CONSENT / AUDIT ID</th><th>TIMESTAMP</th></tr></thead><tbody>{visibleEvents.map((event) => <tr key={event.id}><td><span className={`status-badge status-${eventStatus(event.eventType)}`}><i />{formatEventName(event.eventType)}</span></td><td><div className="purpose-cell"><span className="purpose-icon"><ShieldCheck size={15} /></span><span><strong>{event.purpose}</strong><small>{event.userId}</small></span></div></td><td className="date-cell">{event.category}</td><td className="date-cell">{event.consentId ?? `ACCESS-${event.id.toString().replace("access-", "")}`}</td><td className="date-cell">{formatEventDate(event.occurredAt)}</td></tr>)}</tbody></table></div>}
+    <section className="panel history-panel"><div className="history-toolbar"><div><h2>Consent &amp; access events</h2><p>{visibleEvents.length} {visibleEvents.length === 1 ? "event" : "events"} in this view</p></div><div className="history-controls"><label className="search-field"><SearchIcon /><input aria-label="Search consent events" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search events..." /></label><select className="filter-select" aria-label="Filter by event type" value={filter} onChange={(event) => onFilterChange(event.target.value)}><option value="all">All events</option><option value="requested">Requested</option><option value="granted">Granted</option><option value="rejected">Rejected</option><option value="withdrawn">Withdrawn</option><option value="expired">Expired</option><option value="access_allowed">Access allowed</option><option value="access_denied">Access denied</option><option value="demo_reset">Sandbox reset</option></select></div></div>
+      {visibleEvents.length === 0 ? <div className="empty-state"><div className="empty-icon"><HistoryIcon /></div><strong>No consent or access events found</strong><p>{events.length === 0 ? "Consent and data-access activity will appear here as you use the sandbox." : "Try changing your search or event filter."}</p></div> : <div className="table-scroll"><table className="consent-table event-table"><thead><tr><th>EVENT</th><th>PROCESSING PURPOSE</th><th>DATA CATEGORY</th><th>CONSENT / AUDIT ID</th><th>TIMESTAMP</th></tr></thead><tbody>{visibleEvents.map((event) => <tr key={event.id}><td><span className={`status-badge status-${eventStatus(event.eventType)}`}><i />{formatEventName(event.eventType)}</span></td><td><div className="purpose-cell"><span className="purpose-icon"><ShieldCheck size={15} /></span><span><strong>{event.purpose}</strong><small>{event.userId}</small></span></div></td><td className="date-cell">{event.category}</td><td className="date-cell">{event.consentId ?? `ACCESS-${event.id.toString().replace("access-", "")}`}</td><td className="date-cell">{formatEventDate(event.occurredAt)}</td></tr>)}</tbody></table></div>}
     </section>
     <div className="history-note"><ShieldCheck size={16} /><span>In a production system, consent records should be tamper-evident and retained according to applicable policies.</span></div>
   </>;
 }
 
 function eventStatus(event: ConsentEvent["eventType"]): ConsentStatus {
-  if (event === "requested") return "pending";
+  if (event === "requested" || event === "demo_reset") return "pending";
   if (event === "granted" || event === "access_allowed") return "active";
   if (event === "access_denied") return "rejected";
   return event;
@@ -364,6 +462,7 @@ function eventStatus(event: ConsentEvent["eventType"]): ConsentStatus {
 function formatEventName(event: ConsentEvent["eventType"]): string {
   if (event === "access_allowed") return "Access allowed";
   if (event === "access_denied") return "Access denied";
+  if (event === "demo_reset") return "Sandbox reset";
   return event;
 }
 

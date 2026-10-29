@@ -59,7 +59,6 @@ export default function Sidebar({ current, onNavigate, mobileOpen, onClose }: Si
             >
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
-              {label === "Automated Test Lab" && <span className="nav-count">3</span>}
             </button>
           ))}
         </nav>
@@ -71,7 +70,7 @@ export default function Sidebar({ current, onNavigate, mobileOpen, onClose }: Si
             <p>This sandbox uses synthetic data. Nothing here affects real accounts.</p>
             <span className="sandbox-note-link">Learn about the sandbox <ArrowLeftFromLine size={13} /></span>
           </div>
-          <div className="sidebar-version"><span className="status-dot" /> All systems operational <span>v0.1</span></div>
+          <div className="sidebar-version"><span className="status-dot" /> Local test sandbox <span>v0.1</span></div>
         </div>
       </aside>
     </>

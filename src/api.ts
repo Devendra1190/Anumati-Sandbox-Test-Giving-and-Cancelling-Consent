@@ -1,5 +1,5 @@
 import { demoOrganisation, demoUser } from "./data/demo";
-import type { AccessDecision, AccessResponse, ConsentEvent, ConsentRecord } from "./types";
+import type { AccessDecision, AccessResponse, ConsentEvent, ConsentRecord, DashboardStats, TestLabConfig, TestResult } from "./types";
 
 interface ApiEnvelope<T> {
   data: T;
@@ -13,9 +13,23 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers
     }
   });
-  const payload = await response.json() as ApiEnvelope<T> | { error: string };
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(response.ok
+      ? "The sandbox returned an invalid response."
+      : `The sandbox request failed (${response.status}) without a valid error response.`);
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new Error("The sandbox returned an invalid response.");
+  }
   if (!response.ok) {
-    throw new Error("error" in payload ? payload.error : `Request failed (${response.status}).`);
+    const error = "error" in payload && typeof payload.error === "string" ? payload.error : null;
+    throw new Error(error ?? `Request failed (${response.status}).`);
+  }
+  if (!("data" in payload)) {
+    throw new Error("The sandbox response did not contain data.");
   }
   return (payload as ApiEnvelope<T>).data;
 }
@@ -31,6 +45,14 @@ export function getConsents(): Promise<ConsentRecord[]> {
 
 export function getConsentHistory(): Promise<ConsentEvent[]> {
   return apiRequest(`/api/consents/history?${demoQuery}`);
+}
+
+export function getDashboardStats(): Promise<DashboardStats> {
+  return apiRequest("/api/dashboard/stats");
+}
+
+export function resetDemoData(): Promise<{ message: string; stats: DashboardStats }> {
+  return apiRequest("/api/demo/reset", { method: "POST" });
 }
 
 export function createConsentRequest(purposeId: string): Promise<ConsentRecord> {
@@ -49,6 +71,28 @@ export function transitionConsent(
   action: "grant" | "reject" | "withdraw"
 ): Promise<ConsentRecord> {
   return apiRequest(`/api/consents/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+}
+
+export function getTestLabConfig(): Promise<TestLabConfig> {
+  return apiRequest("/api/test-lab/config");
+}
+
+export function updateTestLabConfig(config: TestLabConfig): Promise<TestLabConfig> {
+  return apiRequest("/api/test-lab/config", {
+    method: "PUT",
+    body: JSON.stringify(config)
+  });
+}
+
+export function runAutomatedTests(testId?: string): Promise<{ results: TestResult[]; config: TestLabConfig }> {
+  return apiRequest("/api/test-lab/run", {
+    method: "POST",
+    body: JSON.stringify(testId ? { testId } : {})
+  });
+}
+
+export function getTestResults(): Promise<TestResult[]> {
+  return apiRequest("/api/test-lab/results");
 }
 
 export function checkMockDataAccess(input: {
@@ -76,12 +120,22 @@ export async function requestMockDataAccess(input: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...input, organizationId: demoOrganisation.id })
   });
-  const payload = await response.json() as { data?: AccessDecision; error?: string };
-  if (!payload.data) {
-    throw new Error(payload.error ?? `Access request failed (${response.status}).`);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(`Access request failed (${response.status}) with an invalid response.`);
   }
+  if (!payload || typeof payload !== "object" || !("data" in payload) ||
+    !payload.data || typeof payload.data !== "object") {
+    const error = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+      ? payload.error
+      : `Access request failed (${response.status}).`;
+    throw new Error(error);
+  }
+  const body = payload as { data: AccessDecision; error?: string };
   return {
     httpStatus: response.status,
-    body: { data: payload.data, ...(payload.error ? { error: payload.error } : {}) }
+    body: { data: body.data, ...(body.error ? { error: body.error } : {}) }
   };
 }

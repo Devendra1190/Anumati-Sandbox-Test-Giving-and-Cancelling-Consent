@@ -24,7 +24,7 @@ export interface ConsentRecord {
 export interface ConsentEvent {
   id: number | string;
   consentId: string | null;
-  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired" | "access_allowed" | "access_denied";
+  eventType: "requested" | "granted" | "rejected" | "withdrawn" | "expired" | "access_allowed" | "access_denied" | "demo_reset";
   occurredAt: string;
   details: string | null;
   purposeId: string;
@@ -58,8 +58,46 @@ export interface AccessResponse {
 
 export interface TestResult {
   id: string;
+  testId: string;
   name: string;
-  result: "Passed" | "Failed";
-  detail: string;
-  time: string;
+  expectedResult: string;
+  actualResult: string;
+  status: "PASS" | "FAIL" | "NEEDS REVIEW";
+  executionTimeMs: number;
+  failureExplanation: string | null;
+  journeyComparison?: {
+    grant: JourneyMetrics;
+    withdrawal: JourneyMetrics;
+    status: "PASS" | "FAIL" | "NEEDS REVIEW";
+    explanation: string;
+  };
+  runId: string;
+  executedAt: string;
+}
+
+export interface DashboardStats {
+  active: number;
+  withdrawn: number;
+  tests: number;
+  passed: number;
+  failed: number;
+  needsReview: number;
+  activity: Array<{ date: string; label: string; grants: number; withdrawals: number }>;
+}
+
+export interface JourneyMetrics {
+  actions: string[];
+  clicks: number;
+  navigationTransitions: number;
+  mandatoryFields: number;
+  additionalConfirmations: number;
+  unnecessaryObstacles: number;
+  errors: number;
+}
+
+export interface TestLabConfig {
+  extraNavigation: boolean;
+  mandatoryField: boolean;
+  extraConfirmation: boolean;
+  unnecessaryError: boolean;
 }
