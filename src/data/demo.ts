@@ -1,4 +1,4 @@
-import type { ConsentRecord, TestResult } from "../types";
+import type { TestResult } from "../types";
 
 export const demoUser = {
   name: "Aarav Mehta",
@@ -14,47 +14,12 @@ export const demoOrganisation = {
   sector: "Financial services"
 };
 
-export const initialConsents: ConsentRecord[] = [
-  {
-    id: "CNS-1048",
-    purpose: "Personalised recommendations",
-    category: "Personalisation",
-    status: "Active",
-    grantedAt: "24 Oct 2026",
-    expiresAt: "24 Oct 2027"
-  },
-  {
-    id: "CNS-1047",
-    purpose: "Monthly account statements",
-    category: "Account services",
-    status: "Active",
-    grantedAt: "19 Oct 2026",
-    expiresAt: "19 Oct 2027"
-  },
-  {
-    id: "CNS-1046",
-    purpose: "Partner offers and updates",
-    category: "Marketing",
-    status: "Withdrawn",
-    grantedAt: "12 Oct 2026",
-    expiresAt: "12 Oct 2027"
-  },
-  {
-    id: "CNS-1045",
-    purpose: "Fraud prevention checks",
-    category: "Security",
-    status: "Active",
-    grantedAt: "08 Oct 2026",
-    expiresAt: "08 Oct 2027"
-  },
-  {
-    id: "CNS-1044",
-    purpose: "Location-based services",
-    category: "Personalisation",
-    status: "Withdrawn",
-    grantedAt: "02 Oct 2026",
-    expiresAt: "02 Oct 2027"
-  }
+export const demoPurposes = [
+  { id: "PUR-RECOMMENDATIONS", name: "Personalised recommendations", category: "Personalisation" },
+  { id: "PUR-STATEMENTS", name: "Monthly account statements", category: "Account services" },
+  { id: "PUR-PARTNER-OFFERS", name: "Partner offers and updates", category: "Marketing" },
+  { id: "PUR-FRAUD-PREVENTION", name: "Fraud prevention checks", category: "Security" },
+  { id: "PUR-LOCATION", name: "Location-based services", category: "Personalisation" }
 ];
 
 export const initialTestResults: TestResult[] = [

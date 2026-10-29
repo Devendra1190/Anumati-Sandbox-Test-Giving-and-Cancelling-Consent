@@ -28,9 +28,9 @@ export default function ConsentTable({ records, onViewAll, title = "Recent conse
               {records.map((record) => (
                 <tr key={record.id}>
                   <td><div className="purpose-cell"><span className="purpose-icon"><ShieldCheck size={15} /></span><span><strong>{record.purpose}</strong><small>{record.category} · {record.id}</small></span></div></td>
-                  <td><span className={`status-badge status-${record.status.toLowerCase()}`}><i />{record.status}</span></td>
-                  <td className="date-cell">{record.grantedAt}</td>
-                  <td className="date-cell">{record.expiresAt}</td>
+                  <td><span className={`status-badge status-${record.status}`}><i />{record.status}</span></td>
+                  <td className="date-cell">{formatDate(record.grantedAt)}</td>
+                  <td className="date-cell">{formatDate(record.expiresAt)}</td>
                   <td><button className="icon-button row-more" aria-label={`More options for ${record.purpose}`}><MoreHorizontal size={18} /></button></td>
                 </tr>
               ))}
@@ -40,4 +40,9 @@ export default function ConsentTable({ records, onViewAll, title = "Recent conse
       )}
     </section>
   );
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(value));
 }

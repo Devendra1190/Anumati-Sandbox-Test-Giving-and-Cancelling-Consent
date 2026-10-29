@@ -334,3 +334,20 @@ h1,h2,h3,p { margin-top: 0; }
   .test-lab-stats { gap: 7px; }
   .test-lab-stats>div { gap: 7px; padding: 10px; }
 }
+.api-error { display: flex; align-items: center; gap: 9px; padding: 11px 13px; margin-bottom: 15px; border: 1px solid #f1cecb; border-radius: 8px; color: #a64e4a; background: #fff5f4; font-size: 10px; }
+.api-error span { flex: 1; }
+.api-error button { padding: 5px 8px; border: 1px solid #edcfcc; border-radius: 5px; color: #a64e4a; background: white; font-size: 9px; font-weight: 600; }
+.api-loading { padding: 9px 12px; margin-bottom: 12px; border: 1px solid #dcece8; border-radius: 7px; color: #4b8179; background: #f2faf7; font-size: 10px; }
+.consent-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.consent-actions .button { min-height: 29px; padding: 0 9px; font-size: 9px; }
+.status-badge { text-transform: capitalize; }
+.status-pending { color: #9a7939; background: #fff5df; }
+.status-rejected { color: #a45e62; background: #fff0f1; }
+.status-withdrawn,.status-expired { color: #7e7184; background: #f4eff6; }
+.event-table td { white-space: nowrap; }
+.event-table .purpose-cell { min-width: 195px; }
+@media (max-width: 520px) {
+  .preference-row { flex-wrap: wrap; }
+  .preference-copy { flex-basis: calc(100% - 55px); }
+  .consent-actions { width: 100%; justify-content: flex-end; }
+}
