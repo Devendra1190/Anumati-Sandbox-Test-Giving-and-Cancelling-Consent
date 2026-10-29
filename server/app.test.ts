@@ -238,4 +238,51 @@ describe("consent REST API", () => {
     assert.equal("mockData" in expired.body.data, false);
     db.close();
   });
+
+  it("runs the withdrawal ease suite against isolated consent logic and detects configured friction", async () => {
+    const { app, db } = setup();
+    const normal = await request(app).post("/api/test-lab/run").send({}).expect(200);
+    assert.equal(normal.body.data.results.length, 9);
+    assert.ok(normal.body.data.results.every((result: { status: string; expectedResult: string; actualResult: string; executionTimeMs: number }) =>
+      ["PASS", "FAIL", "NEEDS REVIEW"].includes(result.status) &&
+      result.expectedResult.length > 0 &&
+      result.actualResult.length > 0 &&
+      result.executionTimeMs >= 0
+    ));
+    assert.ok(normal.body.data.results.every((result: { status: string }) => result.status === "PASS"));
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM consents").get()?.count, 5);
+
+    await request(app).put("/api/test-lab/config").send({
+      extraNavigation: true,
+      mandatoryField: false,
+      extraConfirmation: false,
+      unnecessaryError: false
+    }).expect(200);
+    const navigationScenario = await request(app).post("/api/test-lab/run").send({ testId: "withdrawal-ease" }).expect(200);
+    assert.equal(navigationScenario.body.data.results[0].status, "NEEDS REVIEW");
+    assert.equal(navigationScenario.body.data.results[0].journeyComparison.withdrawal.navigationTransitions, 3);
+
+    await request(app).put("/api/test-lab/config").send({
+      extraNavigation: false,
+      mandatoryField: true,
+      extraConfirmation: false,
+      unnecessaryError: false
+    }).expect(200);
+    const fieldScenario = await request(app).post("/api/test-lab/run").send({ testId: "withdrawal-ease" }).expect(200);
+    assert.equal(fieldScenario.body.data.results[0].status, "FAIL");
+    assert.equal(fieldScenario.body.data.results[0].journeyComparison.withdrawal.mandatoryFields, 1);
+
+    const restored = await request(app).put("/api/test-lab/config").send({
+      extraNavigation: false,
+      mandatoryField: false,
+      extraConfirmation: false,
+      unnecessaryError: false
+    }).expect(200);
+    assert.equal(restored.body.data.extraNavigation, false);
+    const normalAgain = await request(app).post("/api/test-lab/run").send({ testId: "withdrawal-ease" }).expect(200);
+    assert.equal(normalAgain.body.data.results[0].status, "PASS");
+    await request(app).put("/api/test-lab/config").send({ extraNavigation: "yes" }).expect(400);
+    await request(app).post("/api/test-lab/run").send({ testId: "unknown" }).expect(400);
+    db.close();
+  });
 });

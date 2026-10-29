@@ -1,5 +1,5 @@
 import { demoOrganisation, demoUser } from "./data/demo";
-import type { AccessDecision, AccessResponse, ConsentEvent, ConsentRecord } from "./types";
+import type { AccessDecision, AccessResponse, ConsentEvent, ConsentRecord, TestLabConfig, TestResult } from "./types";
 
 interface ApiEnvelope<T> {
   data: T;
@@ -49,6 +49,24 @@ export function transitionConsent(
   action: "grant" | "reject" | "withdraw"
 ): Promise<ConsentRecord> {
   return apiRequest(`/api/consents/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+}
+
+export function getTestLabConfig(): Promise<TestLabConfig> {
+  return apiRequest("/api/test-lab/config");
+}
+
+export function updateTestLabConfig(config: TestLabConfig): Promise<TestLabConfig> {
+  return apiRequest("/api/test-lab/config", {
+    method: "PUT",
+    body: JSON.stringify(config)
+  });
+}
+
+export function runAutomatedTests(testId?: string): Promise<{ results: TestResult[]; config: TestLabConfig }> {
+  return apiRequest("/api/test-lab/run", {
+    method: "POST",
+    body: JSON.stringify(testId ? { testId } : {})
+  });
 }
 
 export function checkMockDataAccess(input: {

@@ -20,20 +20,28 @@ import {
   XCircle
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { checkMockDataAccess, createConsentRequest, getConsentHistory, getConsents, requestMockDataAccess, transitionConsent } from "./api";
+import { checkMockDataAccess, createConsentRequest, getConsentHistory, getConsents, getTestLabConfig, requestMockDataAccess, runAutomatedTests, transitionConsent, updateTestLabConfig } from "./api";
 import ConsentTable from "./components/ConsentTable";
 import Sidebar from "./components/Sidebar";
 import StatCard from "./components/StatCard";
 import Topbar from "./components/Topbar";
-import { demoDataCategories, demoOrganisation, demoPurposes, demoUser, demoUsers, initialTestResults } from "./data/demo";
-import type { AccessResponse, ConsentEvent, ConsentRecord, ConsentStatus, Section, TestResult } from "./types";
+import { demoDataCategories, demoOrganisation, demoPurposes, demoUser, demoUsers } from "./data/demo";
+import type { AccessResponse, ConsentEvent, ConsentRecord, ConsentStatus, Section, TestLabConfig, TestResult } from "./types";
 
 function App() {
+  const defaultTestConfig: TestLabConfig = {
+    extraNavigation: false,
+    mandatoryField: false,
+    extraConfirmation: false,
+    unnecessaryError: false
+  };
   const [section, setSection] = useState<Section>("Dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [consents, setConsents] = useState<ConsentRecord[]>([]);
   const [consentEvents, setConsentEvents] = useState<ConsentEvent[]>([]);
-  const [testResults, setTestResults] = useState<TestResult[]>(initialTestResults);
+  const [testResults, setTestResults] = useState<TestResult[]>([]);
+  const [testConfig, setTestConfig] = useState<TestLabConfig>(defaultTestConfig);
+  const [testRunning, setTestRunning] = useState(false);
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [accessPurpose, setAccessPurpose] = useState(demoPurposes[0].id);
@@ -55,13 +63,16 @@ function App() {
       setApiError(error instanceof Error ? error.message : "Unable to load consent data.");
       setApiLoading(false);
     });
+    getTestLabConfig().then(setTestConfig).catch((error: unknown) => {
+      setApiError(error instanceof Error ? error.message : "Unable to load Test Lab settings.");
+    });
   }, [refreshConsentData]);
 
   const counts = useMemo(() => ({
     active: consents.filter((consent) => consent.status === "active").length,
     withdrawn: consents.filter((consent) => consent.status === "withdrawn").length,
     tests: testResults.length,
-    failed: testResults.filter((test) => test.result === "Failed").length
+    failed: testResults.filter((test) => test.status === "FAIL").length
   }), [consents, testResults]);
 
   async function performConsentAction(action: () => Promise<unknown>) {
@@ -105,27 +116,27 @@ function App() {
     }
   }
 
-  function runTest(name?: string) {
-    const testNames = [
-      "Withdrawal blocks future access",
-      "Purpose limitation check",
-      "Consent expiry enforcement",
-      "Consent record integrity"
-    ];
-    const selectedTests = name ? [name] : testNames;
-    setTestResults((current) => [
-      ...selectedTests.map((selected, index): TestResult => {
-        const failed = selected === "Consent expiry enforcement";
-        return {
-          id: `TST-${String(83 + current.length - initialTestResults.length + index).padStart(4, "0")}`,
-          name: selected,
-          result: failed ? "Failed" : "Passed",
-          detail: failed ? "An expired consent was accepted by the mock service." : "The simulated consent checks behaved as expected.",
-          time: "Just now"
-        };
-      }),
-      ...current
-    ]);
+  async function runTest(testId?: string) {
+    setApiError("");
+    setTestRunning(true);
+    try {
+      const response = await runAutomatedTests(testId);
+      setTestConfig(response.config);
+      setTestResults(response.results);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to run the automated tests.");
+    } finally {
+      setTestRunning(false);
+    }
+  }
+
+  async function changeTestConfig(config: TestLabConfig) {
+    setApiError("");
+    try {
+      setTestConfig(await updateTestLabConfig(config));
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Unable to update the withdrawal scenario.");
+    }
   }
 
   function renderPage() {
@@ -135,7 +146,7 @@ function App() {
       case "Data Access Simulator":
         return <AccessPage userId={accessUser} onUserChange={(value) => { setAccessUser(value); setAccessResult(null); }} category={accessCategory} onCategoryChange={(value) => { setAccessCategory(value); setAccessResult(null); }} purpose={accessPurpose} onPurposeChange={(value) => { setAccessPurpose(value); setAccessResult(null); }} result={accessResult} onCheck={checkAccess} onRequest={requestAccess} />;
       case "Automated Test Lab":
-        return <TestLabPage results={testResults} onRun={runTest} failed={counts.failed} />;
+        return <TestLabPage results={testResults} onRun={runTest} failed={counts.failed} config={testConfig} onConfigChange={changeTestConfig} running={testRunning} />;
       case "Consent History":
         return <HistoryPage events={consentEvents} filter={filter} onFilterChange={setFilter} search={search} onSearchChange={setSearch} />;
       default:
@@ -225,7 +236,7 @@ function DashboardPage({ counts, consents, onNavigate, results }: DashboardPageP
         <section className="panel test-summary">
           <div className="panel-heading"><div><h2>Latest test runs</h2><p>Quality checks in your sandbox</p></div><button className="text-button" onClick={() => onNavigate("Automated Test Lab")}>Test lab <ArrowRight size={14} /></button></div>
           <div className="test-list">
-            {results.slice(0, 3).map((test) => <div className="test-row" key={test.id}><span className={`test-result-icon ${test.result === "Passed" ? "test-passed" : "test-failed"}`}>{test.result === "Passed" ? <Check size={14} /> : <XCircle size={15} />}</span><div className="test-row-copy"><strong>{test.name}</strong><small>{test.time}</small></div><span className={`test-result-label ${test.result.toLowerCase()}`}>{test.result}</span></div>)}
+            {results.slice(0, 3).map((test) => <div className="test-row" key={test.id}><span className={`test-result-icon ${test.status === "PASS" ? "test-passed" : "test-failed"}`}>{test.status === "PASS" ? <Check size={14} /> : <XCircle size={15} />}</span><div className="test-row-copy"><strong>{test.name}</strong><small>{test.executionTimeMs} ms</small></div><span className={`test-result-label ${test.status.toLowerCase().replace(" ", "-")}`}>{test.status}</span></div>)}
           </div>
         </section>
       </div>
@@ -309,24 +320,48 @@ function AccessPage({ userId, onUserChange, category, onCategoryChange, purpose,
 
 interface TestLabPageProps {
   results: TestResult[];
-  onRun: (name?: string) => void;
+  onRun: (testId?: string) => void;
   failed: number;
+  config: TestLabConfig;
+  onConfigChange: (config: TestLabConfig) => void;
+  running: boolean;
 }
 
-function TestLabPage({ results, onRun, failed }: TestLabPageProps) {
+function TestLabPage({ results, onRun, failed, config, onConfigChange, running }: TestLabPageProps) {
   const cases = [
-    { name: "Withdrawal blocks future access", description: "Verify access is denied immediately after consent is withdrawn.", icon: LockKeyhole },
-    { name: "Purpose limitation check", description: "Confirm data is only used for the purpose the user approved.", icon: ShieldCheck },
-    { name: "Consent expiry enforcement", description: "Ensure expired permissions cannot authorise new requests.", icon: Clock3 },
-    { name: "Consent record integrity", description: "Check that consent records retain a clear, auditable history.", icon: FileCheck2 }
+    { id: "grant", name: "Consent can be granted successfully", description: "A pending request transitions to active.", icon: CheckCircle2 },
+    { id: "withdraw", name: "Consent can be withdrawn successfully", description: "An active consent transitions to withdrawn.", icon: ArrowDownRight },
+    { id: "access-after-withdrawal", name: "Data access stops immediately after withdrawal", description: "Retry the same request after withdrawal and verify access is denied.", icon: LockKeyhole },
+    { id: "no-consent", name: "Access without consent is denied", description: "No matching consent must produce a denied decision.", icon: ShieldAlert },
+    { id: "purpose-mismatch", name: "Purpose and data-category mismatches are denied", description: "Consent for one purpose or category cannot authorize another.", icon: ShieldCheck },
+    { id: "expired", name: "Expired consent is denied", description: "An expired permission cannot authorize access.", icon: Clock3 },
+    { id: "audit-history", name: "Grant and withdrawal appear in audit history", description: "Verify both events remain in append-only history.", icon: FileCheck2 },
+    { id: "repeated-withdrawal", name: "Repeated withdrawal preserves canonical state", description: "A second withdrawal must not reactivate consent or add a duplicate event.", icon: RotateCcw },
+    { id: "withdrawal-ease", name: "Withdrawal requires no unjustified extra steps", description: "Compare actions, navigation, required fields, confirmations, obstacles, and errors.", icon: Activity }
+  ];
+  const currentJourneyResult = results.find((result) => result.id === "withdrawal-ease")?.journeyComparison;
+  function changeScenario(key: keyof TestLabConfig, value: boolean) {
+    onConfigChange({ ...config, [key]: value });
+  }
+  const scenarioOptions: Array<{ key: keyof TestLabConfig; label: string; description: string }> = [
+    { key: "extraNavigation", label: "Add extra navigation", description: "Route withdrawal through Account Settings and Privacy Centre." },
+    { key: "mandatoryField", label: "Require an extra field", description: "Require a withdrawal explanation that granting does not request." },
+    { key: "extraConfirmation", label: "Add an extra confirmation", description: "Require a second confirmation before withdrawal." },
+    { key: "unnecessaryError", label: "Inject an unnecessary error", description: "Simulate an avoidable failure and recovery step." }
   ];
   return <>
-    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> QUALITY ASSURANCE</div><h1>Automated Test Lab</h1><p>Run consent safeguards against the synthetic sandbox environment.</p></div><button className="button button-primary" onClick={() => onRun()}><FlaskConical size={16} /> Run all tests</button></div>
-    <div className="demo-banner"><div className="demo-banner-icon"><FlaskConical size={17} /></div><div><strong>Tests run locally against mock records</strong><p>Results illustrate expected consent behaviours — they do not certify legal or regulatory compliance.</p></div><span className="demo-banner-tag">SIMULATION</span></div>
-    <div className="test-lab-stats"><div><span className="mini-stat-icon green"><CheckCircle2 size={17} /></span><span><strong>{results.filter((item) => item.result === "Passed").length}</strong><small>Passed</small></span></div><div><span className="mini-stat-icon red"><XCircle size={17} /></span><span><strong>{failed}</strong><small>Failed</small></span></div><div><span className="mini-stat-icon blue"><Activity size={17} /></span><span><strong>{results.length}</strong><small>Total runs</small></span></div></div>
-    <section className="panel test-cases-panel"><div className="panel-heading"><div><h2>Available test cases</h2><p>Run individual checks or the full test suite</p></div><span className="consent-count">{cases.length} test cases</span></div><div className="test-cases-list">{cases.map(({ name, description, icon: Icon }) => <article className="test-case-row" key={name}><span className="test-case-icon"><Icon size={18} /></span><div><strong>{name}</strong><p>{description}</p></div><button className="button button-secondary run-test-button" onClick={() => onRun(name)}>Run test <ArrowRight size={14} /></button></article>)}</div></section>
-    <section className="panel results-panel"><div className="panel-heading"><div><h2>Test run history</h2><p>Latest results from this session</p></div><span className="results-session">This session</span></div>{results.length === 0 ? <div className="empty-state"><div className="empty-icon"><FlaskConical size={21} /></div><strong>No tests have been run</strong><p>Run a test to see its results here.</p></div> : <div className="test-history">{results.map((result) => <div className="test-history-row" key={result.id}><span className={`test-result-icon ${result.result === "Passed" ? "test-passed" : "test-failed"}`}>{result.result === "Passed" ? <Check size={14} /> : <XCircle size={15} />}</span><div className="test-history-copy"><strong>{result.name}</strong><span>{result.detail}</span></div><span className={`status-badge ${result.result === "Passed" ? "status-active" : "status-failed"}`}><i />{result.result}</span><small>{result.time}</small></div>)}</div>}</section>
+    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> QUALITY ASSURANCE</div><h1>Automated Test Lab</h1><p>Run nine consent and withdrawal checks against real backend logic.</p></div><button className="button button-primary" onClick={() => onRun()} disabled={running}><FlaskConical size={16} /> {running ? "Running tests…" : "Run all tests"}</button></div>
+    <div className="demo-banner"><div className="demo-banner-icon"><FlaskConical size={17} /></div><div><strong>Isolated tests against application consent logic</strong><p>Each run uses temporary SQLite data and leaves the persisted demo records unchanged. This is a technical assessment, not legal certification or a DPDP compliance score.</p></div><span className="demo-banner-tag">SYNTHETIC</span></div>
+    <div className="test-lab-stats"><div><span className="mini-stat-icon green"><CheckCircle2 size={17} /></span><span><strong>{results.filter((item) => item.status === "PASS").length}</strong><small>Passed</small></span></div><div><span className="mini-stat-icon red"><XCircle size={17} /></span><span><strong>{failed}</strong><small>Failed</small></span></div><div><span className="mini-stat-icon amber"><Activity size={17} /></span><span><strong>{results.filter((item) => item.status === "NEEDS REVIEW").length}</strong><small>Needs review</small></span></div><div><span className="mini-stat-icon blue"><Activity size={17} /></span><span><strong>{results.length}</strong><small>Tests in latest run</small></span></div></div>
+    <section className="panel scenario-panel"><div className="panel-heading"><div><h2>Withdrawal journey scenario</h2><p>Configure realistic friction to verify the tester catches it</p></div><button className="button button-secondary" disabled={running} onClick={() => onConfigChange({ extraNavigation: false, mandatoryField: false, extraConfirmation: false, unnecessaryError: false })}><RotateCcw size={14} /> Restore normal journey</button></div><div className="scenario-options">{scenarioOptions.map(({ key, label, description }) => <label className="scenario-option" key={key}><input type="checkbox" checked={config[key]} disabled={running} onChange={(event) => changeScenario(key, event.target.checked)} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</div><p className="scenario-note">Scenario settings are stored by the backend. Run the “withdrawal ease” test after changing a setting to see PASS, FAIL, or NEEDS REVIEW.</p></section>
+    <section className="panel test-cases-panel"><div className="panel-heading"><div><h2>Available test cases</h2><p>Run an individual backend check or the complete suite</p></div><span className="consent-count">{cases.length} test cases</span></div><div className="test-cases-list">{cases.map(({ id, name, description, icon: Icon }) => <article className="test-case-row" key={id}><span className="test-case-icon"><Icon size={18} /></span><div><strong>{name}</strong><p>{description}</p></div><button className="button button-secondary run-test-button" disabled={running} onClick={() => onRun(id)}>Run test <ArrowRight size={14} /></button></article>)}</div></section>
+    {currentJourneyResult && <section className="panel journey-comparison"><div className="panel-heading"><div><h2>Journey comparison</h2><p>Measured from the configured synthetic workflow</p></div><span className={`journey-result ${currentJourneyResult.status.toLowerCase().replace(" ", "-")}`}>{currentJourneyResult.status}</span></div><div className="journey-table-wrap"><table className="journey-table"><thead><tr><th>Measure</th><th>Grant consent</th><th>Withdraw consent</th></tr></thead><tbody><tr><th>Action sequence</th><td>{currentJourneyResult.grant.actions.join(" → ")}</td><td>{currentJourneyResult.withdrawal.actions.join(" → ")}</td></tr><tr><th>User actions / clicks</th><td>{metricLabel(currentJourneyResult.grant.clicks, "click")}</td><td>{metricLabel(currentJourneyResult.withdrawal.clicks, "click")}</td></tr><tr><th>Navigation transitions</th><td>{currentJourneyResult.grant.navigationTransitions}</td><td>{currentJourneyResult.withdrawal.navigationTransitions}</td></tr><tr><th>Mandatory form fields</th><td>{currentJourneyResult.grant.mandatoryFields}</td><td>{currentJourneyResult.withdrawal.mandatoryFields}</td></tr><tr><th>Additional confirmations</th><td>{currentJourneyResult.grant.additionalConfirmations}</td><td>{currentJourneyResult.withdrawal.additionalConfirmations}</td></tr><tr><th>Unnecessary obstacles / errors</th><td>{currentJourneyResult.grant.unnecessaryObstacles} / {currentJourneyResult.grant.errors}</td><td>{currentJourneyResult.withdrawal.unnecessaryObstacles} / {currentJourneyResult.withdrawal.errors}</td></tr></tbody></table></div><p className="journey-explanation">{currentJourneyResult.explanation} Click counts alone do not establish DPDP compliance.</p></section>}
+    <section className="panel results-panel"><div className="panel-heading"><div><h2>Test results</h2><p>Expected and actual outcomes from the latest run</p></div><span className="results-session">{results.length} results</span></div>{results.length === 0 ? <div className="empty-state"><div className="empty-icon"><FlaskConical size={21} /></div><strong>No tests have been run</strong><p>Run an individual test or the complete suite to see measured results.</p></div> : <div className="detailed-test-results">{results.map((result) => <article className="detailed-test-result" key={result.id}><div className="test-result-heading"><span className={`status-badge test-status-${result.status.toLowerCase().replace(" ", "-")}`}><i />{result.status}</span><strong>{result.name}</strong><small>{result.executionTimeMs.toFixed(2)} ms</small></div><dl><div><dt>Expected</dt><dd>{result.expectedResult}</dd></div><div><dt>Actual</dt><dd>{result.actualResult}</dd></div>{result.failureExplanation && <div><dt>Explanation</dt><dd className="failure-explanation">{result.failureExplanation}</dd></div>}</dl></article>)}</div>}</section>
   </>;
+}
+
+function metricLabel(value: number, label: string): string {
+  return `${value} ${label}${value === 1 ? "" : "s"}`;
 }
 
 interface HistoryPageProps {

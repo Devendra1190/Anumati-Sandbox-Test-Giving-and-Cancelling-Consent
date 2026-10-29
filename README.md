@@ -50,10 +50,15 @@ All responses use a `{ "data": ... }` envelope; validation and state-transition 
 | `POST` | `/api/consents/:id/withdraw` | Immediately withdraw an active consent |
 | `GET` | `/api/data-access/check` | Check whether `userId`, `organizationId`, `purposeId`, and `dataCategory` are covered by active consent |
 | `POST` | `/api/data-access` | Request mock data; returns HTTP 403 and no protected data unless exact active consent covers the request |
+| `GET` | `/api/test-lab/config` | Retrieve the persisted synthetic withdrawal-journey scenario |
+| `PUT` | `/api/test-lab/config` | Configure extra navigation, a mandatory field, an extra confirmation, or a simulated error (all fields must be boolean) |
+| `POST` | `/api/test-lab/run` | Run all nine checks, or one check with `{"testId":"withdrawal-ease"}` (other test IDs are listed in the Test Lab) |
 
 Every successful state transition updates the canonical consent row and appends a timestamped event in the same SQLite transaction. Database triggers prevent audit-event updates and deletes. Expired active records are transitioned to `expired` when the API is accessed.
 
 Every `POST /api/data-access` decision is stored in the append-only `access_attempts` table and appears in consent history as `access_allowed` or `access_denied`. The simulator uses synthetic profile, account-service, marketing, and security data only.
+
+The Automated Test Lab runs consent grants, withdrawals, access decisions, expiry handling, and audit assertions against the same backend logic as the REST API, using a fresh in-memory SQLite database per check. Test runs do not change the persisted demo consents. Journey configuration is stored in SQLite and can be reset from the UI with **Restore normal journey**. The withdrawal ease result is a technical workflow assessment, not legal certification or a DPDP compliance score; click-count equality alone does not establish compliance.
 
 ## Validate
 

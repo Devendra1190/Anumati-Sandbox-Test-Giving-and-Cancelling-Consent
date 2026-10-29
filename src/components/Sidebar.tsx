@@ -59,7 +59,6 @@ export default function Sidebar({ current, onNavigate, mobileOpen, onClose }: Si
             >
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
-              {label === "Automated Test Lab" && <span className="nav-count">3</span>}
             </button>
           ))}
         </nav>

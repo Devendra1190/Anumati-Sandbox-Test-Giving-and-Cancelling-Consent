@@ -87,6 +87,13 @@ export function createDatabase(filename: string): DatabaseSync {
       occurred_at TEXT NOT NULL,
       reason TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS test_lab_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      extra_navigation INTEGER NOT NULL DEFAULT 0,
+      mandatory_field INTEGER NOT NULL DEFAULT 0,
+      extra_confirmation INTEGER NOT NULL DEFAULT 0,
+      unnecessary_error INTEGER NOT NULL DEFAULT 0
+    );
     CREATE INDEX IF NOT EXISTS idx_consent_events_consent
       ON consent_events(consent_id, occurred_at, id);
     CREATE INDEX IF NOT EXISTS idx_access_attempts_occurred
@@ -108,8 +115,48 @@ export function createDatabase(filename: string): DatabaseSync {
         SELECT RAISE(ABORT, 'access attempts are append-only');
       END;
   `);
+  db.prepare("INSERT OR IGNORE INTO test_lab_config (id) VALUES (1)").run();
   seedDatabase(db);
   return db;
+}
+
+export interface WithdrawalJourneyConfig {
+  extraNavigation: boolean;
+  mandatoryField: boolean;
+  extraConfirmation: boolean;
+  unnecessaryError: boolean;
+}
+
+export function getWithdrawalJourneyConfig(db: DatabaseSync): WithdrawalJourneyConfig {
+  const row = db.prepare(`
+    SELECT extra_navigation AS extraNavigation, mandatory_field AS mandatoryField,
+      extra_confirmation AS extraConfirmation, unnecessary_error AS unnecessaryError
+    FROM test_lab_config WHERE id = 1
+  `).get() as {
+    extraNavigation: number;
+    mandatoryField: number;
+    extraConfirmation: number;
+    unnecessaryError: number;
+  };
+  return {
+    extraNavigation: row.extraNavigation === 1,
+    mandatoryField: row.mandatoryField === 1,
+    extraConfirmation: row.extraConfirmation === 1,
+    unnecessaryError: row.unnecessaryError === 1
+  };
+}
+
+export function setWithdrawalJourneyConfig(db: DatabaseSync, config: WithdrawalJourneyConfig): void {
+  db.prepare(`
+    UPDATE test_lab_config
+    SET extra_navigation = ?, mandatory_field = ?, extra_confirmation = ?, unnecessary_error = ?
+    WHERE id = 1
+  `).run(
+    Number(config.extraNavigation),
+    Number(config.mandatoryField),
+    Number(config.extraConfirmation),
+    Number(config.unnecessaryError)
+  );
 }
 
 export function withTransaction<T>(db: DatabaseSync, callback: () => T): T {

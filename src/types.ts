@@ -59,7 +59,32 @@ export interface AccessResponse {
 export interface TestResult {
   id: string;
   name: string;
-  result: "Passed" | "Failed";
-  detail: string;
-  time: string;
+  expectedResult: string;
+  actualResult: string;
+  status: "PASS" | "FAIL" | "NEEDS REVIEW";
+  executionTimeMs: number;
+  failureExplanation: string | null;
+  journeyComparison?: {
+    grant: JourneyMetrics;
+    withdrawal: JourneyMetrics;
+    status: "PASS" | "FAIL" | "NEEDS REVIEW";
+    explanation: string;
+  };
+}
+
+export interface JourneyMetrics {
+  actions: string[];
+  clicks: number;
+  navigationTransitions: number;
+  mandatoryFields: number;
+  additionalConfirmations: number;
+  unnecessaryObstacles: number;
+  errors: number;
+}
+
+export interface TestLabConfig {
+  extraNavigation: boolean;
+  mandatoryField: boolean;
+  extraConfirmation: boolean;
+  unnecessaryError: boolean;
 }
